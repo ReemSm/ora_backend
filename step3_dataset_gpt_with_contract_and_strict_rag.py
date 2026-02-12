@@ -71,8 +71,11 @@ def is_treatment_request(q):
     ])
 
 def is_out_of_scope(q):
-    dental_keywords = ["tooth","gum","dental","dentist","implant","filling","cavity",
-                       "سن","اللثة","طبيب","حشوة","زرعة","تسوس"]
+    dental_keywords = [
+        "tooth","teeth","gum","gums","dental","dentist","implant","filling",
+        "cavity","decay","root canal","pulp","bleeding","occlusion",
+        "سن","أسنان","اللثة","لثة","طبيب","حشوة","زرعة","تسوس","ألم","نزيف"
+    ]
     ql = q.lower()
     return not any(k in ql for k in dental_keywords)
 
@@ -147,31 +150,44 @@ def rag_refs(query_text, expected_fields):
 def gpt_style_answer(q):
     system = (
         "Write in the exact style, tone, and length of the provided dental Q&A dataset.\n"
-        "Use formal professional language only.\n"
-        "Do not provide diagnosis, prescriptions, or treatment plans.\n"
+        "STRICT:\n"
+        "- One most likely explanation only.\n"
+        "- No bullet points.\n"
+        "- No warnings or alarmist language.\n"
+        "- No follow-up questions.\n"
+        "- No treatment plans or prescriptions.\n"
+        "- Plain language biological explanation.\n"
+        "- End by advising evaluation by a licensed dentist.\n"
+        "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
     )
+
     r = client.responses.create(
         model=MODEL,
+        reasoning={"effort": "low"},
         input=[
             {"role": "system", "content": system},
             {"role": "user", "content": q}
         ],
         max_output_tokens=MAX_GPT_TOKENS
     )
+
     return r.output_text.strip()
 
 # ========= MAIN =========
 if __name__ == "__main__":
     q = input("> ").strip()
 
+    # 🔒 BLOCK TREATMENT / DIAGNOSIS
     if is_treatment_request(q):
         print(refusal_treatment(q))
         exit()
 
+    # 🔒 BLOCK OUT OF SCOPE
     if is_out_of_scope(q):
         print(refusal_scope(q))
         exit()
 
+    # ✅ only now we continue normal flow
     match, score, ar, idx = dataset_match(q)
 
     if match and score >= SIM_THRESHOLD:
