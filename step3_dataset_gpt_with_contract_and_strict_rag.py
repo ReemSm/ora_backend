@@ -73,8 +73,9 @@ def is_treatment_request(q):
 def is_out_of_scope(q):
     dental_keywords = [
         "tooth","teeth","gum","gums","dental","dentist","implant","filling",
-        "cavity","decay","root canal","pulp","bleeding","occlusion",
-        "سن","أسنان","اللثة","لثة","طبيب","حشوة","زرعة","تسوس","ألم","نزيف"
+        "cavity","decay","root canal","pulp","bleeding","occlusion","oral",
+        "pain","swelling","infection","sensitivity",
+        "سن","أسنان","اللثة","لثة","طبيب","حشوة","زرعة","تسوس","ألم","نزيف","تورم","عدوى","حساسية","فم"
     ]
     ql = q.lower()
     return not any(k in ql for k in dental_keywords)
