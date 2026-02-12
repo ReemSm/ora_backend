@@ -71,14 +71,17 @@ def is_treatment_request(q):
     ])
 
 def is_out_of_scope(q):
-    dental_keywords = [
-        "tooth","teeth","gum","gums","dental","dentist","implant","filling",
-        "cavity","decay","root canal","pulp","bleeding","occlusion","oral",
-        "pain","swelling","infection","sensitivity",
-        "سن","أسنان","اللثة","لثة","طبيب","حشوة","زرعة","تسوس","ألم","نزيف","تورم","عدوى","حساسية","فم"
-    ]
     ql = q.lower()
-    return not any(k in ql for k in dental_keywords)
+
+    # ❌ clearly non-dental topics (only these get blocked)
+    banned = [
+        "capital of", "weather", "stock", "bitcoin", "movie", "music",
+        "recipe", "football", "basketball", "politics", "president",
+        "travel", "hotel", "flight", "restaurant",
+        "عاصمة", "طقس", "مباراة", "سياسة", "فيلم", "موسيقى", "سفر", "مطعم"
+    ]
+
+    return any(b in ql for b in banned)
 
 def refusal_treatment(q):
     return "عذرًا، لا يمكنني تقديم تشخيص أو خطة علاجية. يُنصح بمراجعة طبيب أسنان مرخص." if is_ar(q) \
