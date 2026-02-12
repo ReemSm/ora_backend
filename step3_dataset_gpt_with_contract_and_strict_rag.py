@@ -10,21 +10,41 @@ EMBED_MODEL = "text-embedding-3-large"
 SIM_THRESHOLD = 0.70
 PINECONE_INDEX = "oraapp111"
 
-TOP_K_RAW = 8            # strict gate: retrieve 8
-TOP_K_FINAL = 3          # max refs shown
-MIN_AUTHORITY = 0.55     # authority gate
+TOP_K_RAW = 8
+TOP_K_FINAL = 3
+MIN_AUTHORITY = 0.40   # relaxed so references appear again
 
-MAX_GPT_TOKENS = 220     # hard verbosity cap
-
-# ---- STRICT RAG TIGHTENERS (added) ----
-PINECONE_SCORE_MIN = 0.82     # require strong vector match (reduces random refs)
-LOCAL_RERANK_MIN = 0.80       # require strong local semantic match
-REQUIRE_MIN_REFS = 2          # keep your ≥2 refs gate, explicit
+MAX_GPT_TOKENS = 220
 
 client = OpenAI()
 pc = Pinecone()
 index = pc.Index(PINECONE_INDEX)
 
+# ========= POLITE REFUSALS =========
+SCOPE_REFUSAL = "Sorry, this request is outside the scope of this dental application. / عذرًا، هذا الطلب خارج نطاق هذا التطبيق المتخصص في طب الأسنان."
+CLINICAL_REFUSAL = "Sorry, I cannot assist with diagnosis, treatment plans, or prescriptions. / عذرًا، لا يمكنني المساعدة في التشخيص أو خطط العلاج أو الوصفات الطبية."
+
+# ========= SIMPLE SCOPE DETECTION =========
+DENTAL_TERMS = [
+    "tooth","teeth","gum","gums","implant","filling","crown","bridge","root canal",
+    "caries","decay","mouth","oral","jaw","brace","orthodont",
+    "سن","أسنان","لثة","زرعة","حشوة","تلبيسة","تاج","عصب","فم","فك","تقويم","تسوس"
+]
+
+CLINICAL_TERMS = [
+    "diagnosis","diagnose","treatment plan","prescribe","prescription","dosage","dose",
+    "تشخيص","خطة علاج","وصفة","جرعة","دواء","مضاد"
+]
+
+def is_dental(q):
+    ql = q.lower()
+    return any(t in ql for t in DENTAL_TERMS) or any(t in q for t in DENTAL_TERMS)
+
+def is_clinical(q):
+    ql = q.lower()
+    return any(t in ql for t in CLINICAL_TERMS) or any(t in q for t in CLINICAL_TERMS)
+
+# ========= DATASET =========
 # ========= DATASET =========
 DATASET = [
     {
@@ -64,15 +84,7 @@ DATASET = [
     }
 ]
 
-# ========= INTENT PHRASES =========
-INTENT_PHRASES = {
-    0: ["gum bleed", "bleeding gums", "نزيف اللثة", "اللثة تنزف", "لثتي تنزف"],
-    1: ["blue gum", "implant", "زرعة", "زرقة اللثة"],
-    2: ["pain when biting", "after filling", "ألم عند العض", "بعد الحشوة"],
-    3: ["pain disappeared", "اختفى الألم", "راح الألم"],
-    4: ["tooth rotting", "rotting tooth", "تعفن السن", "السن ميت"]
-}
-
+# ========= HELPERS =========
 AR_RE = re.compile(r"[\u0600-\u06FF]")
 
 def is_ar(text):
@@ -87,69 +99,30 @@ def cosine(a, b):
     nb = math.sqrt(sum(x*x for x in b))
     return dot / (na * nb) if na and nb else 0.0
 
+# ========= DATASET MATCH =========
 def dataset_match(q):
-    q_norm = q.lower().strip()
     ar = is_ar(q)
-
-    for idx, phrases in INTENT_PHRASES.items():
-        for p in phrases:
-            if p in q_norm:
-                return DATASET[idx], 1.0, ar, idx
-
     qv = embed(q)
-    best, score, best_idx = None, -1, -1
-    for i, d in enumerate(DATASET):
+
+    best, score = None, -1
+    for d in DATASET:
         dv = embed(d["ar_q"] if ar else d["en_q"])
         s = cosine(qv, dv)
         if s > score:
-            score, best, best_idx = s, d, i
+            score, best = s, d
 
-    return best, score, ar, best_idx
+    return best, score, ar
 
-# ========= SCOPE / POLICY GATES (added) =========
-# One-line only. English + Arabic. No extra justification.
-SCOPE_APOLOGY = "Sorry, this is outside the scope of this dental app. / عذرًا، هذا خارج نطاق تطبيق الأسنان."
-CLINICAL_APOLOGY = "Sorry, I can’t help with diagnosis, treatment plans, or prescriptions. / عذرًا، لا يمكنني المساعدة في التشخيص أو خطة العلاج أو الوصفات."
-
-_DENTAL_HINTS = [
-    "tooth", "teeth", "gum", "gums", "gingiva", "oral", "mouth", "tongue", "jaw",
-    "braces", "orthodont", "implant", "filling", "crown", "bridge", "root canal",
-    "caries", "decay", "enamel", "dentin", "pulp", "periodont", "endodont",
-    "تسوس", "سن", "أسنان", "ضرس", "لثة", "فم", "لسان", "فك", "تقويم", "حشوة", "تلبيسة", "تاج", "عصب", "زرعة"
-]
-
-_DISALLOWED_CLINICAL = [
-    "diagnos", "diagnosis", "what do i have", "what is my condition",
-    "treatment plan", "plan", "prescribe", "prescription", "antibiotic",
-    "dose", "dosage", "mg", "medication", "drug", "painkiller",
-    "وصفة", "وصفه", "روشتة", "روشته", "جرعة", "جرعه", "تشخيص", "شخّص", "خطة علاج", "علاج", "مضاد", "مضاد حيوي"
-]
-
-def is_dental_scope(q: str) -> bool:
-    qn = q.lower()
-    return any(h in qn for h in _DENTAL_HINTS) or is_ar(q) and any(h in q for h in _DENTAL_HINTS)
-
-def is_disallowed_clinical_request(q: str) -> bool:
-    qn = q.lower()
-    return any(k in qn for k in _DISALLOWED_CLINICAL) or (is_ar(q) and any(k in q for k in _DISALLOWED_CLINICAL))
-
-# ========= STRICT RAG GATE =========
+# ========= STRICT RAG =========
 def rag_refs(query_text, expected_fields):
     qv = embed(query_text)
     res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
 
-    # Phase 1: hard filters (authority + specialty + pinecone similarity)
-    filtered = []
+    strong = []
     for m in res.get("matches", []):
         md = m.get("metadata", {})
-        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
-            continue
 
-        # require strong pinecone similarity to avoid "random" refs
-        try:
-            if float(m.get("score", 0)) < PINECONE_SCORE_MIN:
-                continue
-        except Exception:
+        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
             continue
 
         specialty = str(md.get("specialty", "")).lower()
@@ -157,48 +130,21 @@ def rag_refs(query_text, expected_fields):
             continue
 
         title = md.get("title")
-        if not title or not isinstance(title, str) or len(title.strip()) < 6:
-            continue
+        if title and title not in strong:
+            strong.append(title)
 
-        # keep some text to rerank locally (no backend changes)
-        hint_text = f"{title} {md.get('specialty','')}".strip()
-        filtered.append((title.strip(), hint_text))
+    return strong[:TOP_K_FINAL]   # no empty message ever
 
-    # Phase 2: local semantic rerank to enforce relevance deterministically
-    ranked = []
-    if filtered:
-        for title, hint_text in filtered:
-            hv = embed(hint_text)
-            s = cosine(qv, hv)
-            if s >= LOCAL_RERANK_MIN:
-                ranked.append((s, title))
-
-    ranked.sort(key=lambda x: x[0], reverse=True)
-
-    # strict gate: require ≥2 strong refs
-    strong_titles = []
-    for _, t in ranked:
-        if t not in strong_titles:
-            strong_titles.append(t)
-
-    if len(strong_titles) < REQUIRE_MIN_REFS:
-        return []
-
-    return strong_titles[:TOP_K_FINAL]
-
-# ========= GPT FALLBACK (CONTRACT-LOCKED) =========
+# ========= GPT FALLBACK =========
 def gpt_style_answer(q):
     system = (
-        "Write in the exact style, tone, and length of the provided dental Q&A dataset.\n"
-        "STRICT:\n"
-        "- One most likely explanation only.\n"
-        "- No bullet points.\n"
-        "- No warnings or alarmist language.\n"
-        "- No follow-up questions.\n"
-        "- No treatment plans or prescriptions.\n"
-        "- Plain language biological explanation.\n"
-        "- Do not mention missing data, missing references, or say anything like 'no relevant reference'.\n"
-        "- End by advising evaluation by a licensed dentist.\n"
+        "Write in the exact style and tone of a formal dental educational dataset.\n"
+        "Rules:\n"
+        "- One explanation only\n"
+        "- No bullet points\n"
+        "- No casual tone\n"
+        "- No treatment or prescriptions\n"
+        "- End advising consultation with a licensed dentist\n"
     )
 
     r = client.responses.create(
@@ -216,19 +162,18 @@ def gpt_style_answer(q):
 if __name__ == "__main__":
     q = input("> ").strip()
 
-    # Out-of-scope (non-dental): one-line bilingual apology, nothing else
-    if not is_dental_scope(q):
+    # scope enforcement
+    if not is_dental(q):
         print("\n--- ANSWER ---\n")
-        print(SCOPE_APOLOGY)
-        raise SystemExit(0)
+        print(SCOPE_REFUSAL)
+        exit()
 
-    # Disallowed clinical requests: one-line bilingual apology, nothing else
-    if is_disallowed_clinical_request(q):
+    if is_clinical(q):
         print("\n--- ANSWER ---\n")
-        print(CLINICAL_APOLOGY)
-        raise SystemExit(0)
+        print(CLINICAL_REFUSAL)
+        exit()
 
-    match, score, ar, idx = dataset_match(q)
+    match, score, ar = dataset_match(q)
 
     if match and score >= SIM_THRESHOLD:
         answer = match["ar_a"] if ar else match["en_a"]
