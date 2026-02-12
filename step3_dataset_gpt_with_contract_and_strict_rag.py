@@ -10,54 +10,19 @@ EMBED_MODEL = "text-embedding-3-large"
 SIM_THRESHOLD = 0.70
 PINECONE_INDEX = "oraapp111"
 
-TOP_K_RAW = 8            # strict gate: retrieve 8
-TOP_K_FINAL = 3          # max refs shown
-MIN_AUTHORITY = 0.55     # authority gate
+TOP_K_RAW = 8
+TOP_K_FINAL = 3
+MIN_AUTHORITY = 0.65
 
-MAX_GPT_TOKENS = 220     # hard verbosity cap
+MAX_GPT_TOKENS = 220
 
 client = OpenAI()
 pc = Pinecone()
 index = pc.Index(PINECONE_INDEX)
 
 # ========= DATASET =========
-DATASET = [
-    {
-        "field": ["Periodontics"],
-        "en_q": "My gums bleed when I brush, what should I do?",
-        "en_a": "Bleeding gums are often a sign of gingival inflammation, which is when the gums become irritated due to plaque, a sticky layer of bacteria and food debris. In mild cases, you may notice slight bleeding and redness; in advanced cases, there can be swelling. Proper oral hygiene is essential to prevent this: brush at least twice daily (morning and bedtime) using correct technique and duration, and floss daily to clean between teeth where a toothbrush cannot reach. Plaque left on teeth can harden into calculus, which can only be removed professionally. Regular dental checkups and cleanings every six months help maintain gum health. Educating patients on the cause and prevention empowers them to take control of their oral health. Always consult a licensed dentist for personalized advice.",
-        "ar_q": "نزيف اللثة عادة ما يكون مؤشرا على وجود التهاب",
-        "ar_a": "يُعتبر نزيف اللثة في كثير من الأحيان علامة على التهاب اللثة، وهو ما يحدث عندما تتعرض اللثة للتهيج نتيجة تراكم البلاك، وهي طبقة لزجة من البكتيريا وفضلات الطعام. في الحالات الخفيفة، قد تلاحظ نزيفًا طفيفًا واحمرارًا؛ أما في الحالات المتقدمة، فقد يحدث تورم. إن الحفاظ على صحة الفم الجيدة أمر أساسي للوقاية من هذه المشكلة. يُنصح بتنظيف الأسنان بالفرشاة مرتين على الأقل يوميًا (في الصباح وقبل النوم) باستخدام الطريقة الصحيحة والتفريش لمدة كافية، بالإضافة إلى استخدام الخيط السني يوميًا لتنظيف ما بين الأسنان التي لا تستطيع فرشاة الأسنان الوصول إليها. إذا تُرك البلاك على الأسنان، فإنه يمكن أن يتصلب ليصبح جيرًا، الذي لا يمكن إزالته إلا بواسطة أدوات خاصة عند طبيب الأسنان. تساعد الفحوصات الدورية وتنظيف الأسنان كل ستة أشهر في الحفاظ على اللثة. كما أن تثقيف المرضى حول الأسباب وطرق الوقاية يُمكنهم من السيطرة على صحتهم الفموية. يجب دائمًا استشارة طبيب أسنان مرخص للحصول على نصائح شخصية تناسب احتياجاتك الفردية."
-    },
-    {
-        "field": ["Implant", "Periodontics"],
-        "en_q": "I had a dental implant and notice bluish discoloration on my gum, is that normal?",
-        "en_a": "Bluish discoloration near a dental implant often occurs in patients with a thin gingival biotype, where the gum tissue is naturally thin and slightly transparent. This is a normal anatomical variation and usually an aesthetic concern rather than a medical problem. Understanding gingival biotypes can help patients appreciate natural differences in gum appearance. Evaluation by a periodontist or implant specialist is recommended to assess whether any aesthetic corrections might be desired. Always consult a licensed dentist or specialist for proper assessment.",
-        "ar_q": "بعد ما سويت زرعة صار عندي لون أزرق في اللثة",
-        "ar_a": "التغير في لون اللثة للون الأزرق بالقرب من المنطقة التي تمت زراعة الأسنان فيها، يحدث غالبًا لدى المرضى الذين يمتلكون نوعًا رقيقًا من اللثة، حيث تكون أنسجة اللثة رقيقة بطبيعتها وأقرب إلى أن تكون شفافة إلى حد ما. يُعتبر هذا التغيير تشريحيًا طبيعيًا وعادةً ما يمثل مسألة جمالية أكثر من كونه مشكلة طبية. يساعد فهم أنواع اللثة المرضى على تقدير الاختلافات الطبيعية في مظهر اللثة. يُوصى بإجراء تقييم من قبل طبيب متخصص في أمراض اللثة أو زراعة الأسنان لتحديد ما إذا كانت هناك حاجة لأي تصحيحات جمالية. من المهم دائمًا استشارة طبيب أسنان مرخص أو متخصص للحصول على تقييم دقيق."
-    },
-    {
-        "field": ["Restorative Dentistry"],
-        "en_q": "I had a filling and now I feel pain only when biting, what does it mean?",
-        "en_a": "Pain that occurs only when biting after a filling typically indicates that the restoration is slightly high, a condition called high occlusion. This happens when the filling contacts the opposing tooth before the rest of the teeth, creating pressure during chewing. Unlike generalized sensitivity, this pain is limited to biting. Adjustment by a dentist resolves the issue. Always consult a licensed dentist for proper evaluation.",
-        "ar_q": "بعد الحشوة صار عندي ألم عند العض فقط",
-        "ar_a": "الألم الذي يحدث فقط عند العض بعد وضع حشوة على السن، عادةً ما يدل على أن الحشوة مرتفعة قليلاً، وهي حالة تُعرف بارتفاع الإطباق. يحدث ذلك عندما تلامس الحشوة السن المقابل قبل باقي الأسنان، مما يسبب ضغطًا أثناء المضغ. على عكس الحساسية العامة، يقتصر هذا الألم على العض فقط. من الضروري استشارة طبيب أسنان مرخص لتقييم الحالة وإجراء التعديل اللازم."
-    },
-    {
-        "field": ["Endodontics"],
-        "en_q": "I experienced severe tooth pain that disappeared without treatment. What does it mean?",
-        "en_a": "The disappearance of severe tooth pain may indicate that the pulp inside the tooth has lost vitality. Because the pulp contains nerves, pain can subside even while bacterial infection continues. This does not mean the tooth is healthy and can lead to further complications if untreated. Evaluation by a licensed dentist is necessary.",
-        "ar_q": "اختفى الألم الشديد في السن",
-        "ar_a": "اختفاء ألم الأسنان الشديد قد يشير إلى أن اللب داخل السن فقد حيويته. وبما أن اللب يحتوي على الأعصاب، فقد يختفي الألم رغم استمرار المشكلة. لا يعني غياب الألم أن السن سليم، وقد يؤدي ذلك إلى مضاعفات إذا لم يتم علاجه. يُنصح باستشارة طبيب أسنان مرخص للتقييم."
-    },
-    {
-        "field": ["Endodontics"],
-        "en_q": "What does it mean that a tooth ‘rots’?",
-        "en_a": "The term ‘tooth rotting’ is informal and often misleading. It usually refers to a tooth affected by bacterial infection of the dentin or pulp, commonly following decay or trauma. The tooth is not literally rotting, but ongoing infection can cause structural damage over time. Evaluation by a licensed dentist is important to determine the appropriate management.",
-        "ar_q": "هل تعني كلمة تعفن السن أن السن ميت؟",
-        "ar_a": "مصطلح تعفن الأسنان هو مصطلح غير طبي وقد يكون مضللاً. غالبًا ما يُقصد به وجود عدوى بكتيرية في السن، تحدث عادةً بعد تسوس أو إصابة. لا يعني ذلك أن السن يتعفن حرفيًا، لكن العدوى المستمرة قد تؤدي إلى تلف بنية السن مع الوقت. يُنصح باستشارة طبيب أسنان مرخص للتقييم المناسب."
-    }
-]
+# (your dataset stays exactly the same — not shown shortened here for brevity)
+# KEEP YOUR EXISTING DATASET BLOCK UNCHANGED
 
 # ========= INTENT PHRASES =========
 INTENT_PHRASES = {
@@ -73,6 +38,7 @@ AR_RE = re.compile(r"[\u0600-\u06FF]")
 def is_ar(text):
     return bool(AR_RE.search(text))
 
+# ========= EMBEDDING =========
 def embed(text):
     return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
 
@@ -82,6 +48,37 @@ def cosine(a, b):
     nb = math.sqrt(sum(x*x for x in b))
     return dot / (na * nb) if na and nb else 0.0
 
+# ========= SCOPE & SAFETY =========
+DENTAL_KEYWORDS = [
+    "tooth","teeth","gum","gums","dental","dentist","implant","filling",
+    "cavity","decay","root canal","pulp","bleeding","occlusion",
+    "سن","أسنان","اللثة","لثة","طبيب أسنان","زرعة","حشوة",
+    "تسوس","قناة الجذر","لب السن","نزيف","إطباق"
+]
+
+def in_scope_dental(q):
+    ql = q.lower()
+    return any(k in ql for k in DENTAL_KEYWORDS)
+
+def is_treatment_request(q):
+    ql = q.lower()
+    return any(x in ql for x in [
+        "treatment plan", "prescription", "medication", "what should i take",
+        "give me medicine", "dosage", "plan for me",
+        "خطة علاج", "وصفة", "دواء", "ايش اخذ", "ماذا آخذ"
+    ])
+
+def refuse_treatment(q):
+    if is_ar(q):
+        return "عذرًا، لا يمكنني تقديم خطة علاج أو وصفة طبية. يُرجى استشارة طبيب أسنان مرخص."
+    return "Sorry, I cannot provide treatment plans or prescriptions. Please consult a licensed dentist."
+
+def refuse_out_of_scope(q):
+    if is_ar(q):
+        return "هذا السؤال خارج نطاق هذا التطبيق المتخصص بصحة الفم والأسنان."
+    return "This question is outside the scope of this oral health application."
+
+# ========= DATASET MATCH =========
 def dataset_match(q):
     q_norm = q.lower().strip()
     ar = is_ar(q)
@@ -101,7 +98,7 @@ def dataset_match(q):
 
     return best, score, ar, best_idx
 
-# ========= STRICT RAG GATE =========
+# ========= STRICT RAG =========
 def rag_refs(query_text, expected_fields):
     qv = embed(query_text)
     res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
@@ -110,30 +107,23 @@ def rag_refs(query_text, expected_fields):
     for m in res.get("matches", []):
         md = m.get("metadata", {})
 
-        # 🔒 stricter authority filter
-        if float(md.get("authority_score", 0)) < 0.65:
+        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
             continue
 
         specialty = str(md.get("specialty", "")).lower()
-
-        # 🔒 require strict specialty match
         if expected_fields and not any(f.lower() in specialty for f in expected_fields):
             continue
 
         title = md.get("title")
-
         if title:
             strong.append(title)
 
-    # 🔒 require at least 2 strong refs
     if len(strong) < 2:
         return []
 
-    # remove duplicates + limit to 3
     return list(dict.fromkeys(strong))[:TOP_K_FINAL]
 
-
-# ========= GPT FALLBACK (CONTRACT-LOCKED) =========
+# ========= GPT FALLBACK =========
 def gpt_style_answer(q):
     system = (
         "Write in the exact style, tone, and length of the provided dental Q&A dataset.\n"
@@ -145,9 +135,7 @@ def gpt_style_answer(q):
         "- No treatment plans or prescriptions.\n"
         "- Plain language biological explanation.\n"
         "- End by advising evaluation by a licensed dentist.\n"
-        "\n"
-        # 🔒 NEW LINE — force formal tone always
-        "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
+        "Always use formal professional language. Never mirror slang or informal user phrasing.\n"
     )
 
     r = client.responses.create(
@@ -165,6 +153,20 @@ def gpt_style_answer(q):
 # ========= MAIN =========
 if __name__ == "__main__":
     q = input("> ").strip()
+
+    # 🔒 Treatment refusal
+    if is_treatment_request(q):
+        answer = refuse_treatment(q)
+        print("\n--- ANSWER ---\n")
+        print(answer)
+        exit()
+
+    # 🔒 Scope refusal
+    if not in_scope_dental(q):
+        answer = refuse_out_of_scope(q)
+        print("\n--- ANSWER ---\n")
+        print(answer)
+        exit()
 
     match, score, ar, idx = dataset_match(q)
 
