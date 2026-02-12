@@ -109,20 +109,29 @@ def rag_refs(query_text, expected_fields):
     strong = []
     for m in res.get("matches", []):
         md = m.get("metadata", {})
-        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
+
+        # 🔒 stricter authority filter
+        if float(md.get("authority_score", 0)) < 0.65:
             continue
 
         specialty = str(md.get("specialty", "")).lower()
+
+        # 🔒 require strict specialty match
         if expected_fields and not any(f.lower() in specialty for f in expected_fields):
             continue
 
-        strong.append(md.get("title"))
+        title = md.get("title")
 
-    # failure behavior: require ≥2 strong refs
+        if title:
+            strong.append(title)
+
+    # 🔒 require at least 2 strong refs
     if len(strong) < 2:
         return []
 
+    # remove duplicates + limit to 3
     return list(dict.fromkeys(strong))[:TOP_K_FINAL]
+
 
 # ========= GPT FALLBACK (CONTRACT-LOCKED) =========
 def gpt_style_answer(q):
@@ -136,6 +145,9 @@ def gpt_style_answer(q):
         "- No treatment plans or prescriptions.\n"
         "- Plain language biological explanation.\n"
         "- End by advising evaluation by a licensed dentist.\n"
+        "\n"
+        # 🔒 NEW LINE — force formal tone always
+        "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
     )
 
     r = client.responses.create(
@@ -147,6 +159,7 @@ def gpt_style_answer(q):
         ],
         max_output_tokens=MAX_GPT_TOKENS
     )
+
     return r.output_text.strip()
 
 # ========= MAIN =========
