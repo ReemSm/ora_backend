@@ -22,6 +22,21 @@ class AskRequest(BaseModel):
 def ask(req: AskRequest):
     q = req.query.strip()
 
+    # 🔒 1) BLOCK treatment / diagnosis / prescription
+    if rag.is_treatment_request(q):
+        return {
+            "answer": rag.refusal_treatment(q),
+            "references": []
+        }
+
+    # 🔒 2) BLOCK out-of-scope (non-dental)
+    if rag.is_out_of_scope(q):
+        return {
+            "answer": rag.refusal_scope(q),
+            "references": []
+        }
+
+    # ✅ NORMAL FLOW (unchanged)
     match, score, ar, idx = rag.dataset_match(q)
 
     if match and score >= rag.SIM_THRESHOLD:
