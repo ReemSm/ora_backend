@@ -10,41 +10,16 @@ EMBED_MODEL = "text-embedding-3-large"
 SIM_THRESHOLD = 0.70
 PINECONE_INDEX = "oraapp111"
 
-TOP_K_RAW = 8
-TOP_K_FINAL = 3
-MIN_AUTHORITY = 0.40   # relaxed so references appear again
+TOP_K_RAW = 8            # strict gate: retrieve 8
+TOP_K_FINAL = 3          # max refs shown
+MIN_AUTHORITY = 0.55     # authority gate
 
-MAX_GPT_TOKENS = 220
+MAX_GPT_TOKENS = 220     # hard verbosity cap
 
 client = OpenAI()
 pc = Pinecone()
 index = pc.Index(PINECONE_INDEX)
 
-# ========= POLITE REFUSALS =========
-SCOPE_REFUSAL = "Sorry, this request is outside the scope of this dental application. / عذرًا، هذا الطلب خارج نطاق هذا التطبيق المتخصص في طب الأسنان."
-CLINICAL_REFUSAL = "Sorry, I cannot assist with diagnosis, treatment plans, or prescriptions. / عذرًا، لا يمكنني المساعدة في التشخيص أو خطط العلاج أو الوصفات الطبية."
-
-# ========= SIMPLE SCOPE DETECTION =========
-DENTAL_TERMS = [
-    "tooth","teeth","gum","gums","implant","filling","crown","bridge","root canal",
-    "caries","decay","mouth","oral","jaw","brace","orthodont",
-    "سن","أسنان","لثة","زرعة","حشوة","تلبيسة","تاج","عصب","فم","فك","تقويم","تسوس"
-]
-
-CLINICAL_TERMS = [
-    "diagnosis","diagnose","treatment plan","prescribe","prescription","dosage","dose",
-    "تشخيص","خطة علاج","وصفة","جرعة","دواء","مضاد"
-]
-
-def is_dental(q):
-    ql = q.lower()
-    return any(t in ql for t in DENTAL_TERMS) or any(t in q for t in DENTAL_TERMS)
-
-def is_clinical(q):
-    ql = q.lower()
-    return any(t in ql for t in CLINICAL_TERMS) or any(t in q for t in CLINICAL_TERMS)
-
-# ========= DATASET =========
 # ========= DATASET =========
 DATASET = [
     {
@@ -84,7 +59,15 @@ DATASET = [
     }
 ]
 
-# ========= HELPERS =========
+# ========= INTENT PHRASES =========
+INTENT_PHRASES = {
+    0: ["gum bleed", "bleeding gums", "نزيف اللثة", "اللثة تنزف", "لثتي تنزف"],
+    1: ["blue gum", "implant", "زرعة", "زرقة اللثة"],
+    2: ["pain when biting", "after filling", "ألم عند العض", "بعد الحشوة"],
+    3: ["pain disappeared", "اختفى الألم", "راح الألم"],
+    4: ["tooth rotting", "rotting tooth", "تعفن السن", "السن ميت"]
+}
+
 AR_RE = re.compile(r"[\u0600-\u06FF]")
 
 def is_ar(text):
@@ -99,21 +82,26 @@ def cosine(a, b):
     nb = math.sqrt(sum(x*x for x in b))
     return dot / (na * nb) if na and nb else 0.0
 
-# ========= DATASET MATCH =========
 def dataset_match(q):
+    q_norm = q.lower().strip()
     ar = is_ar(q)
-    qv = embed(q)
 
-    best, score = None, -1
-    for d in DATASET:
+    for idx, phrases in INTENT_PHRASES.items():
+        for p in phrases:
+            if p in q_norm:
+                return DATASET[idx], 1.0, ar, idx
+
+    qv = embed(q)
+    best, score, best_idx = None, -1, -1
+    for i, d in enumerate(DATASET):
         dv = embed(d["ar_q"] if ar else d["en_q"])
         s = cosine(qv, dv)
         if s > score:
-            score, best = s, d
+            score, best, best_idx = s, d, i
 
-    return best, score, ar
+    return best, score, ar, best_idx
 
-# ========= STRICT RAG =========
+# ========= STRICT RAG GATE =========
 def rag_refs(query_text, expected_fields):
     qv = embed(query_text)
     res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
@@ -122,29 +110,44 @@ def rag_refs(query_text, expected_fields):
     for m in res.get("matches", []):
         md = m.get("metadata", {})
 
-        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
+        # 🔒 stricter authority filter
+        if float(md.get("authority_score", 0)) < 0.65:
             continue
 
         specialty = str(md.get("specialty", "")).lower()
+
+        # 🔒 require strict specialty match
         if expected_fields and not any(f.lower() in specialty for f in expected_fields):
             continue
 
         title = md.get("title")
-        if title and title not in strong:
+
+        if title:
             strong.append(title)
 
-    return strong[:TOP_K_FINAL]   # no empty message ever
+    # 🔒 require at least 2 strong refs
+    if len(strong) < 2:
+        return []
 
-# ========= GPT FALLBACK =========
+    # remove duplicates + limit to 3
+    return list(dict.fromkeys(strong))[:TOP_K_FINAL]
+
+
+# ========= GPT FALLBACK (CONTRACT-LOCKED) =========
 def gpt_style_answer(q):
     system = (
-        "Write in the exact style and tone of a formal dental educational dataset.\n"
-        "Rules:\n"
-        "- One explanation only\n"
-        "- No bullet points\n"
-        "- No casual tone\n"
-        "- No treatment or prescriptions\n"
-        "- End advising consultation with a licensed dentist\n"
+        "Write in the exact style, tone, and length of the provided dental Q&A dataset.\n"
+        "STRICT:\n"
+        "- One most likely explanation only.\n"
+        "- No bullet points.\n"
+        "- No warnings or alarmist language.\n"
+        "- No follow-up questions.\n"
+        "- No treatment plans or prescriptions.\n"
+        "- Plain language biological explanation.\n"
+        "- End by advising evaluation by a licensed dentist.\n"
+        "\n"
+        # 🔒 NEW LINE — force formal tone always
+        "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
     )
 
     r = client.responses.create(
@@ -156,24 +159,14 @@ def gpt_style_answer(q):
         ],
         max_output_tokens=MAX_GPT_TOKENS
     )
+
     return r.output_text.strip()
 
 # ========= MAIN =========
 if __name__ == "__main__":
     q = input("> ").strip()
 
-    # scope enforcement
-    if not is_dental(q):
-        print("\n--- ANSWER ---\n")
-        print(SCOPE_REFUSAL)
-        exit()
-
-    if is_clinical(q):
-        print("\n--- ANSWER ---\n")
-        print(CLINICAL_REFUSAL)
-        exit()
-
-    match, score, ar = dataset_match(q)
+    match, score, ar, idx = dataset_match(q)
 
     if match and score >= SIM_THRESHOLD:
         answer = match["ar_a"] if ar else match["en_a"]
