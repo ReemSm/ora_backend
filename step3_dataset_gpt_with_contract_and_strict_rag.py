@@ -12,7 +12,7 @@ PINECONE_INDEX = "oraapp111"
 
 TOP_K_RAW = 8            # strict gate: retrieve 8
 TOP_K_FINAL = 3          # max refs shown
-MIN_AUTHORITY = 0.55     # authority gate
+MIN_AUTHORITY = 0.65     # authority gate (raised slightly for cleaner refs)
 
 MAX_GPT_TOKENS = 220     # hard verbosity cap
 
@@ -59,6 +59,31 @@ DATASET = [
     }
 ]
 
+# ========= SCOPE + SAFETY =========
+def is_ar(text):
+    return bool(re.search(r"[\u0600-\u06FF]", text))
+
+def is_treatment_request(q):
+    ql = q.lower()
+    return any(x in ql for x in [
+        "treatment","prescription","medication","diagnosis","plan","what should i take",
+        "خطة علاج","وصفة","دواء","تشخيص","علاج"
+    ])
+
+def is_out_of_scope(q):
+    dental_keywords = ["tooth","gum","dental","dentist","implant","filling","cavity",
+                       "سن","اللثة","طبيب","حشوة","زرعة","تسوس"]
+    ql = q.lower()
+    return not any(k in ql for k in dental_keywords)
+
+def refusal_treatment(q):
+    return "عذرًا، لا يمكنني تقديم تشخيص أو خطة علاجية. يُنصح بمراجعة طبيب أسنان مرخص." if is_ar(q) \
+           else "Sorry, I cannot provide diagnosis or treatment plans. Please consult a licensed dentist."
+
+def refusal_scope(q):
+    return "عذرًا، هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان." if is_ar(q) \
+           else "Sorry, this question is outside the scope of this oral health application."
+
 # ========= INTENT PHRASES =========
 INTENT_PHRASES = {
     0: ["gum bleed", "bleeding gums", "نزيف اللثة", "اللثة تنزف", "لثتي تنزف"],
@@ -67,11 +92,6 @@ INTENT_PHRASES = {
     3: ["pain disappeared", "اختفى الألم", "راح الألم"],
     4: ["tooth rotting", "rotting tooth", "تعفن السن", "السن ميت"]
 }
-
-AR_RE = re.compile(r"[\u0600-\u06FF]")
-
-def is_ar(text):
-    return bool(AR_RE.search(text))
 
 def embed(text):
     return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
@@ -101,7 +121,7 @@ def dataset_match(q):
 
     return best, score, ar, best_idx
 
-# ========= STRICT RAG GATE =========
+# ========= STRICT RAG =========
 def rag_refs(query_text, expected_fields):
     qv = embed(query_text)
     res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
@@ -109,62 +129,48 @@ def rag_refs(query_text, expected_fields):
     strong = []
     for m in res.get("matches", []):
         md = m.get("metadata", {})
-
-        # 🔒 stricter authority filter
-        if float(md.get("authority_score", 0)) < 0.65:
+        if float(md.get("authority_score", 0)) < MIN_AUTHORITY:
             continue
-
         specialty = str(md.get("specialty", "")).lower()
-
-        # 🔒 require strict specialty match
         if expected_fields and not any(f.lower() in specialty for f in expected_fields):
             continue
-
         title = md.get("title")
-
         if title:
             strong.append(title)
 
-    # 🔒 require at least 2 strong refs
     if len(strong) < 2:
         return []
 
-    # remove duplicates + limit to 3
     return list(dict.fromkeys(strong))[:TOP_K_FINAL]
 
-
-# ========= GPT FALLBACK (CONTRACT-LOCKED) =========
+# ========= GPT =========
 def gpt_style_answer(q):
     system = (
         "Write in the exact style, tone, and length of the provided dental Q&A dataset.\n"
-        "STRICT:\n"
-        "- One most likely explanation only.\n"
-        "- No bullet points.\n"
-        "- No warnings or alarmist language.\n"
-        "- No follow-up questions.\n"
-        "- No treatment plans or prescriptions.\n"
-        "- Plain language biological explanation.\n"
-        "- End by advising evaluation by a licensed dentist.\n"
-        "\n"
-        # 🔒 NEW LINE — force formal tone always
-        "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
+        "Use formal professional language only.\n"
+        "Do not provide diagnosis, prescriptions, or treatment plans.\n"
     )
-
     r = client.responses.create(
         model=MODEL,
-        reasoning={"effort": "low"},
         input=[
             {"role": "system", "content": system},
             {"role": "user", "content": q}
         ],
         max_output_tokens=MAX_GPT_TOKENS
     )
-
     return r.output_text.strip()
 
 # ========= MAIN =========
 if __name__ == "__main__":
     q = input("> ").strip()
+
+    if is_treatment_request(q):
+        print(refusal_treatment(q))
+        exit()
+
+    if is_out_of_scope(q):
+        print(refusal_scope(q))
+        exit()
 
     match, score, ar, idx = dataset_match(q)
 
@@ -179,7 +185,6 @@ if __name__ == "__main__":
 
     refs = rag_refs(rag_query, fields)
 
-    print("\n--- ANSWER ---\n")
     print(answer)
 
     if refs:
