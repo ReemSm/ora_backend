@@ -163,6 +163,12 @@ def gpt_style_answer(q):
         "- Plain language biological explanation.\n"
         "- End by advising evaluation by a licensed dentist.\n"
         "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
+         "Arabic language rule (when the user writes in Arabic):\n"
+        "Write in clear, natural, idiomatic Arabic used by dental professionals.\n"
+        "Avoid literal translations from English or uncommon technical wording.\n"
+        "Prefer familiar, widely used medical terms that sound natural to native speakers.\n"
+        "If a direct translation sounds unnatural, rewrite it into natural Arabic.\n"
+        "The Arabic text must read as if originally written in Arabic, not translated.\n"
     )
 
     r = client.responses.create(
