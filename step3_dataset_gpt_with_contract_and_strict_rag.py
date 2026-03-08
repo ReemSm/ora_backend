@@ -65,9 +65,12 @@ def is_ar(text):
 
 def is_treatment_request(q):
     ql = q.lower()
-    return any(x in ql for x in [
-        "treatment","prescription","medication","diagnosis","plan","what should i take",
-        "خطة علاج","وصفة","دواء","تشخيص","علاج"
+
+    # Only block explicit requests for prescriptions or medical diagnosis
+    blocked = [
+        "prescribe", "write prescription", "which medication",
+        "which antibiotic", "give me medication",
+        "وصفة", "اعطني دواء", "اي مضاد حيوي", "شخص حالتي"
     ])
 
 def is_out_of_scope(q):
@@ -159,18 +162,17 @@ def gpt_style_answer(q):
         "- No bullet points.\n"
         "- No warnings or alarmist language.\n"
         "- No follow-up questions.\n"
-        "- No treatment plans or prescriptions.\n"
+        "- You may explain treatment considerations exactly in the style used in the dataset answers.\n"
+        "- Mention treatments only as general possibilities, never as a decision or instruction.\n"
+        "- Do not diagnose the patient.\n"
         "- Plain language biological explanation.\n"
         "- End by advising evaluation by a licensed dentist.\n"
         "Always use formal, professional language. Never mirror slang or informal user phrasing.\n"
-         "Arabic language rule (when the user writes in Arabic):\n"
-        "Write in clear, natural, idiomatic Arabic used by dental professionals.\n"
-        "Avoid literal translations from English or uncommon technical wording.\n"
-        "Prefer familiar, widely used medical terms that sound natural to native speakers.\n"
-        "If a direct translation sounds unnatural, rewrite it into natural Arabic.\n"
-        "The Arabic text must read as if originally written in Arabic, not translated.\n"
+        "Example style from dataset:\n"
+    "Bleeding gums are often a sign of gingival inflammation, which is when the gums become irritated due to plaque, a sticky layer of bacteria and food debris. In mild cases, you may notice slight bleeding and redness; in advanced cases, there can be swelling. Proper oral hygiene is essential to prevent this: brush at least twice daily (morning and bedtime) using correct technique and duration, and floss daily to clean between teeth where a toothbrush cannot reach. Plaque left on teeth can harden into calculus, which can only be removed professionally. Regular dental checkups and cleanings every six months help maintain gum health. Educating patients on the cause and prevention empowers them to take control of their oral health. Always consult a licensed dentist for personalized advice.\n"
+       "Example of treatment reasoning:\n"
+    "When swelling is present around a tooth, it usually indicates inflammation caused by infection in the surrounding tissues. In these situations, the local environment can become more acidic, which may reduce the effectiveness of local anesthesia. This does not necessarily mean anesthesia will not work, but it can sometimes make achieving full numbness more difficult. Dentists evaluate whether the swelling is localized or diffuse before deciding how to address the source of infection. In localized cases, the cause may be addressed by removing the source through extraction or root canal treatment when appropriate. If swelling is more widespread, the infection may first need to be controlled before the underlying cause is treated. The exact decision depends on clinical examination, so evaluation by a licensed dentist is necessary.\n"
     )
-
     r = client.responses.create(
         model=MODEL,
         reasoning={"effort": "low"},
