@@ -71,7 +71,7 @@ def is_treatment_request(q):
         "prescribe", "write prescription", "which medication",
         "which antibiotic", "give me medication",
         "وصفة", "اعطني دواء", "اي مضاد حيوي", "شخص حالتي"
-    ])
+    ]
 
 def is_out_of_scope(q):
     ql = q.lower()
