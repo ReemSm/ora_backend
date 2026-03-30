@@ -14,14 +14,11 @@ TOP_K_RAW = 8
 TOP_K_FINAL = 3
 MIN_AUTHORITY = 0.65
 
-# [Fix 1] Raised from 220 → 600.
-# At 220, reasoning tokens consumed most of the budget, leaving ~100-150 tokens
-# for actual output. Arabic text is especially token-heavy — this was the
-# primary cause of cut-off responses.
-MAX_GPT_TOKENS = 600
+# Raised 600 → 800 to give Arabic follow-up responses more room.
+# Reasoning tokens at "low" effort consume roughly 100-150 tokens,
+# leaving ~650-700 for actual output — sufficient for structured answers.
+MAX_GPT_TOKENS = 800
 
-# [Fix 2] The metadata field name in Pinecone that holds the document text.
-# ⚠️ Check your actual Pinecone metadata — common names: "chunk_text", "title", "source_type", "authority_score", "source_path"
 PINECONE_TEXT_FIELD = "chunk_text"
 
 client = OpenAI()
@@ -98,6 +95,35 @@ def refusal_scope(q):
     return "عذرًا، هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان." if is_ar(q) \
            else "Sorry, this question is outside the scope of this oral health application."
 
+# ========= QUESTION TYPE DETECTION =========
+# [New — Fix 2/9] Drives conditional formatting in the system prompt.
+# instruction → numbered steps are required and appropriate
+# symptom     → prose explaining cause, mechanism, and meaning
+# informational → prose explanation
+def detect_question_type(q):
+    ql = q.lower()
+    instruction_signals = [
+        "how to", "how do i", "what should i do", "aftercare",
+        "after surgery", "after extraction", "after root canal",
+        "after implant", "after filling", "steps", "instructions",
+        "كيف", "ماذا أفعل", "ماذا يجب", "تعليمات", "خطوات",
+        "بعد العملية", "بعد الخلع", "بعد التركيب", "بعد الزرعة",
+        "بعد عملية", "بعد الحشوة", "ايش أسوي"
+    ]
+    symptom_signals = [
+        "pain", "hurt", "hurts", "bleed", "bleeding", "swell", "swelling",
+        "ache", "sensitivity", "sensitive", "feel", "notice", "discomfort",
+        "ألم", "يؤلم", "يؤلمني", "نزيف", "تورم", "حساسية",
+        "أشعر", "لاحظت", "يحس", "وجع", "موجوع"
+    ]
+    for sig in instruction_signals:
+        if sig in ql:
+            return "instruction"
+    for sig in symptom_signals:
+        if sig in ql:
+            return "symptom"
+    return "informational"
+
 # ========= INTENT PHRASES =========
 INTENT_PHRASES = {
     0: ["gum bleed", "bleeding gums", "نزيف اللثة", "اللثة تنزف", "لثتي تنزف"],
@@ -117,29 +143,21 @@ def cosine(a, b):
     nb = math.sqrt(sum(x * x for x in b))
     return dot / (na * nb) if na and nb else 0.0
 
-# [Fix 3] Pre-compute all dataset embeddings once when the module loads.
-# Previously: up to 5 embed() calls per request inside dataset_match().
-# Now: 10 embed() calls total at startup, 0 during query time for dataset comparison.
-# Server startup will take a few extra seconds — this is expected and normal.
 print("[ORA] Pre-computing dataset embeddings...")
 _DATASET_EN_VECS = [embed(d["en_q"]) for d in DATASET]
 _DATASET_AR_VECS = [embed(d["ar_q"]) for d in DATASET]
 print(f"[ORA] Done — {len(DATASET)} entries cached.")
 
 # ========= DATASET MATCH =========
-# [Fix 3] Now accepts qv (pre-computed query vector) to avoid redundant embed() calls.
-# qv is computed once in the caller and passed here — no re-embedding.
 def dataset_match(q, qv=None):
     q_norm = q.lower().strip()
     ar = is_ar(q)
 
-    # Intent phrase matching first — zero embedding cost
     for idx, phrases in INTENT_PHRASES.items():
         for p in phrases:
             if p in q_norm:
                 return DATASET[idx], 1.0, ar, idx
 
-    # Use pre-computed dataset vectors; compute qv only if not passed in
     if qv is None:
         qv = embed(q)
 
@@ -155,20 +173,19 @@ def dataset_match(q, qv=None):
 # ========= RAG RETRIEVAL =========
 def _extract_text(md):
     """
-    Try common Pinecone metadata field names for document text.
-    Falls back through alternatives if PINECONE_TEXT_FIELD is not found.
-    ⚠️ If retrieval returns empty chunks, check your actual Pinecone field names.
+    [Fix 10] Added diagnostic logging so you can see exactly which metadata
+    field is being matched — or whether none matched at all.
+    If you see "No text found" warnings, check your actual Pinecone field names
+    by inspecting the logged available fields and updating PINECONE_TEXT_FIELD.
     """
     for field in [PINECONE_TEXT_FIELD, "chunk_text", "title", "source_type", "authority_score", "source_path"]:
         val = md.get(field, "")
         if val:
+            print(f"[ORA RAG] Text matched on field='{field}' len={len(str(val))}")
             return str(val).strip()
+    print(f"[ORA RAG] WARNING — no text found. Fields present: {list(md.keys())}")
     return ""
 
-# [Fix 2] Replaces rag_refs().
-# Previously: returned only titles, document content never reached GPT.
-# Now: returns both context_chunks (injected into GPT prompt) and display_titles (shown to user).
-# Also accepts pre-computed qv to avoid a second embed() call.
 def rag_retrieve(qv, expected_fields=None):
     res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
 
@@ -184,7 +201,6 @@ def rag_retrieve(qv, expected_fields=None):
         text = _extract_text(md)
         strong.append({"title": title, "text": text})
 
-    # Deduplicate by title (or by first 60 chars of text if no title)
     seen = set()
     unique = []
     for s in strong:
@@ -196,88 +212,158 @@ def rag_retrieve(qv, expected_fields=None):
     context_chunks = [s["text"] for s in unique if s["text"]][:TOP_K_FINAL]
     display_titles = [s["title"] for s in unique if s["title"]][:TOP_K_FINAL]
 
+    print(f"[ORA RAG] {len(context_chunks)} usable chunks / {len(display_titles)} titles retrieved")
     return context_chunks, display_titles
 
 # ========= GPT =========
-# [Fix 2] Now accepts context_chunks from rag_retrieve() — GPT answer is grounded
-#         in actual retrieved documents instead of relying on model memory.
-# [Fix 1] Uses the corrected MAX_GPT_TOKENS = 600.
-# Arabic prompt now enforces natural conversational tone, not formal MSA.
-def gpt_style_answer(q, context_chunks=None):
+def gpt_style_answer(q, context_chunks=None, history=None):
+    """
+    Changes from previous version:
+    - [Fix 1/3]  "No bullet points" rule removed — replaced with conditional formatting
+    - [Fix 2]    "One explanation only" removed — replaced with depth requirement
+    - [Fix 4]    RAG grounding relaxed from "only" to "primary source + supplement"
+    - [Fix 6]    Symptom questions now explicitly required to explain cause + mechanism
+    - [Fix 7]    history parameter added — passed as prior turns into the input list
+    - [Fix 8]    "Consult a dentist" is now conditional and must follow a complete answer
+    - [Fix 9]    All rules that conflict with useful output removed or inverted
+    - [Fix 5/ar] Arabic rules tightened: specific terms listed, MSA explicitly forbidden
+    """
     ar = is_ar(q)
+    qtype = detect_question_type(q)
 
-    # [Fix 2] Build context block from retrieved Pinecone documents
+    # --- RAG context block ---
+    # [Fix 4] Changed from "only reference material" to "primary + supplement".
+    # The old wording caused GPT to hedge when RAG content was sparse or partially
+    # relevant, because it had no fallback. Now it can fill gaps with established
+    # dental knowledge, which prevents artificial under-answering.
     if context_chunks:
         context_section = (
-            "\n\nBase your answer on the following reference material only. "
-            "Do not add facts that are not supported here:\n\n"
+            "\n\nReference material — treat as your primary source. "
+            "You may supplement gaps using well-established general dental knowledge. "
+            "Do not fabricate specific clinical claims unsupported by either:\n\n"
             + "\n---\n".join(context_chunks)
         )
     else:
         context_section = (
-            "\n\nNo reference material was retrieved. "
-            "Answer using only well-established general dental knowledge. "
-            "Do not invent specific clinical details."
+            "\n\nNo reference material retrieved. "
+            "Answer entirely from well-established general dental knowledge. "
+            "Be specific and genuinely useful — do not hedge or claim insufficient information."
         )
 
-    # Language-specific prompt rules
+    # --- Format rules (question-type-aware) ---
+    # [Fix 2/9] Previously: "No bullet points" was unconditional and broke instruction answers.
+    # Now: format is chosen based on what the question actually needs.
+    if qtype == "instruction":
+        format_rules = (
+            "FORMAT: This is an aftercare or how-to question. "
+            "Use numbered steps or bullet points — this is required here. "
+            "Steps should be brief, specific, and actionable.\n"
+        )
+    elif qtype == "symptom":
+        format_rules = (
+            "FORMAT: This is a symptom question. Write in natural flowing prose. "
+            "You must cover: (1) the most likely cause, (2) the mechanism — why it happens "
+            "physiologically, (3) what it typically means for the patient. "
+            "Be specific. A vague or overly cautious answer does not help the user.\n"
+        )
+    else:
+        format_rules = (
+            "FORMAT: This is an informational question. "
+            "Write in clear, natural flowing prose. Be complete and specific.\n"
+        )
+
+    # --- Disclaimer rule ---
+    # [Fix 8] Previously unconditional and often replaced or shortened the answer.
+    # Now explicit: the disclaimer is one sentence, comes last, never truncates content.
+    disclaimer_rule = (
+        "DISCLAIMER: After giving a complete and informative answer, add exactly one brief "
+        "sentence advising consultation with a licensed dentist for personal evaluation. "
+        "This sentence comes last. It must never replace, shorten, or appear before the answer.\n"
+    )
+
+    # --- Language rules ---
+    # [Fix 5] Arabic rules now explicitly name which terms stay in English.
+    # Previous version was vague ("keep common dental terms") which caused
+    # inconsistent handling — e.g. plaque being translated to اللويحة الجرثومية.
     if ar:
         lang_rules = (
-            "\n\nLANGUAGE — Arabic response required:\n"
-            "- Write in natural, conversational Arabic. NOT formal MSA. NOT translated sentences.\n"
-            "- Sound like a knowledgeable friend explaining something clearly and simply.\n"
-            "- Keep common English dental terms as-is: plaque, scaling, block, crown, implant, "
-            "filling, whitening, root canal, veneer, etc.\n"
-            "- After each English term, add a short Arabic explanation in parentheses if helpful.\n"
-            "  Correct: 'البلاك (plaque) هو طبقة بكتيريا تتكون على الأسنان'\n"
-            "  Wrong: 'اللويحة السنية البكتيرية هي طبقة لزجة'\n"
-            "- Avoid stiff formal phrases like 'يُعتبر', 'يتضمن', 'يُلاحظ', 'وبما أن'.\n"
-            "- Use direct, everyday phrasing instead.\n"
+            "\nLANGUAGE — Arabic:\n"
+            "- Write in natural, conversational Arabic — Gulf/Modern spoken style.\n"
+            "- NOT formal MSA. NOT translated English sentences.\n"
+            "- Sound like a knowledgeable friend, not a medical text.\n"
+            "- The following dental terms must appear in English exactly as written, "
+            "used naturally inside Arabic sentences: "
+            "plaque, scaling, crown, implant, filling, root canal, veneer, "
+            "whitening, floss, block, calculus, gingivitis, periodontitis.\n"
+            "- Do NOT translate these terms into Arabic. Examples of correct usage:\n"
+            "  'البلاك (plaque) يتراكم على الأسنان'\n"
+            "  'عملية root canal ما تكون مؤلمة في الغالب'\n"
+            "  'الـ scaling هو تنظيف الجير عند طبيب الأسنان'\n"
+            "- A short Arabic clarification in parentheses is allowed the FIRST time a term "
+            "appears, only if it genuinely helps a layperson understand it.\n"
+            "- Forbidden: 'اللويحة الجرثومية', 'قلح الأسنان' (for calculus), "
+            "or any formal MSA rendering of the listed terms.\n"
+            "- Use direct, everyday phrasing: 'يعني', 'يصير', 'لما', 'عشان', 'الحين'.\n"
+            "- Avoid formal openers like 'يُعتبر', 'يتضمن', 'وبما أن', 'تجدر الإشارة'.\n"
         )
     else:
         lang_rules = (
-            "\n\nLANGUAGE — English response required:\n"
-            "- Write in clear, plain English for a general (non-dental) audience.\n"
-            "- Explain any dental term immediately after using it.\n"
+            "\nLANGUAGE — English:\n"
+            "- Clear, plain English for a non-dental adult audience.\n"
+            "- Briefly explain any dental term the first time you use it.\n"
+            "- Warm, calm, conversational tone — like a knowledgeable friend.\n"
         )
 
     system = (
-        "You are ORA, a dental health assistant for general users — not dental students or professionals.\n"
-        "Your tone is calm, clear, and reassuring — like a knowledgeable friend, not a textbook.\n"
-        "\nSTRICT RULES:\n"
-        "- Give one most likely explanation only.\n"
-        "- No bullet points.\n"
-        "- No alarmist or exaggerated language.\n"
-        "- No follow-up questions.\n"
-        "- You may mention treatments only as general possibilities — never as a decision or instruction.\n"
-        "- Do not diagnose the patient.\n"
-        "- Use plain, practical language that any adult understands.\n"
-        "- If reference material is provided below, base your answer on it. Do not invent facts.\n"
-        "- End with a brief note advising the user to consult a licensed dentist.\n"
+        "You are ORA, a dental health assistant for everyday people — not professionals.\n"
+        "Your role is to give genuinely useful, accurate, specific dental information "
+        "in a calm, human tone. Think of yourself as a knowledgeable friend who happens "
+        "to know dentistry well — not a liability-conscious chatbot.\n"
+        "\nCORE RULES:\n"
+        "- Be specific and informative. Vague or overly cautious answers fail the user.\n"
+        "- Explain the most likely cause with enough clinical detail that the user "
+        "actually understands what is happening in their mouth.\n"
+        "- Do NOT claim insufficient information when dental knowledge is available to answer.\n"
+        "- Do NOT hedge unnecessarily or add unprompted apologies or limitations.\n"
+        "- You may describe treatments as general possibilities — never as instructions.\n"
+        "- Frame clinical claims as 'likely', 'often', or 'typically' — not as a diagnosis.\n"
+        "- Do NOT ask the user follow-up questions.\n"
+        "- If prior conversation messages are present, use them to understand context "
+        "and answer the current question accordingly — do not treat the conversation as isolated.\n"
+        "\n"
+        + format_rules
+        + disclaimer_rule
         + lang_rules
         + context_section
     )
+
+    # [Fix 7] Build input with conversation history.
+    # Prior turns give GPT the context it needs to correctly interpret follow-up questions.
+    messages = [{"role": "system", "content": system}]
+    if history:
+        for turn in history:
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": q})
 
     try:
         r = client.responses.create(
             model=MODEL,
             reasoning={"effort": "low"},
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": q}
-            ],
+            input=messages,
             max_output_tokens=MAX_GPT_TOKENS
         )
         return r.output_text.strip()
 
     except Exception as e:
-        # [Fix 1] Graceful fallback — prevents a GPT API error from crashing the endpoint
         print(f"[ORA GPT ERROR] {e}")
         if ar:
             return "عذرًا، حدث خطأ أثناء معالجة سؤالك. يُنصح بمراجعة طبيب أسنان مرخص."
         return "Sorry, an error occurred while processing your question. Please consult a licensed dentist."
 
-# ========= MAIN =========
+# ========= MAIN (CLI) =========
 if __name__ == "__main__":
     q = input("> ").strip()
 
@@ -289,17 +375,14 @@ if __name__ == "__main__":
         print(refusal_scope(q))
         exit()
 
-    # [Fix 3] Single embed() call — reused by both dataset_match and rag_retrieve
     qv = embed(q)
     match, score, ar, idx = dataset_match(q, qv)
 
     if match and score >= SIM_THRESHOLD:
         answer = match["ar_a"] if ar else match["en_a"]
         fields = match["field"]
-        # Answer is pre-written; retrieve refs for display only
         _, refs = rag_retrieve(qv, fields)
     else:
-        # [Fix 2] Retrieve context first, then ground GPT with it
         context_chunks, refs = rag_retrieve(qv, expected_fields=None)
         answer = gpt_style_answer(q, context_chunks)
 
