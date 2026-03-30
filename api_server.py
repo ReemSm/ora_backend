@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Optional
 
 import step3_dataset_gpt_with_contract_and_strict_rag as rag
 
 app = FastAPI()
 
-# --- CORS (required for Base44 browser calls) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,47 +15,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class HistoryTurn(BaseModel):
+    role: str       # must be "user" or "assistant"
+    content: str
+
 class AskRequest(BaseModel):
     query: str
+    history: Optional[List[HistoryTurn]] = []
 
 @app.post("/ask")
 def ask(req: AskRequest):
     q = req.query.strip()
 
-    # 🔒 1) BLOCK treatment / diagnosis / prescription
+    # Serialize history to plain dicts for the RAG module
+    history = [h.dict() for h in (req.history or [])]
+
     if rag.is_treatment_request(q):
-        return {
-            "answer": rag.refusal_treatment(q),
-            "references": []
-        }
+        return {"answer": rag.refusal_treatment(q), "references": []}
 
-    # 🔒 2) BLOCK out-of-scope (non-dental)
     if rag.is_out_of_scope(q):
-        return {
-            "answer": rag.refusal_scope(q),
-            "references": []
-        }
+        return {"answer": rag.refusal_scope(q), "references": []}
 
-    # [Fix 3] Compute query embedding exactly once.
-    # This single vector is reused by both dataset_match() and rag_retrieve()
-    # — previously each function triggered its own embed() call.
     qv = rag.embed(q)
-    match, score, ar, idx = rag.dataset_match(q, qv)
 
-    if match and score >= rag.SIM_THRESHOLD:
-        # Dataset answer is pre-written — use it directly.
-        # Still run rag_retrieve() for display references.
-        answer = match["ar_a"] if ar else match["en_a"]
-        fields = match["field"]
-        _, refs = rag.rag_retrieve(qv, fields)
-
-    else:
-        # [Fix 2] GPT fallback: retrieve document content FIRST, then pass it
-        # into gpt_style_answer() so GPT answers from real sources, not memory.
+    # [Fix 7] If conversation history exists, bypass dataset matching entirely.
+    #
+    # Why: pre-written dataset answers cannot interpret follow-up questions.
+    # A follow-up like "is that serious?" or "what happens if I ignore it?"
+    # needs the prior context to give a coherent answer. Routing it through
+    # a dataset match would either return the wrong canned answer or fall
+    # through to GPT anyway — but without history, making it useless.
+    #
+    # When history is present: always go to GPT with full context.
+    # When no history (first message): use dataset matching as normal.
+    if history:
         context_chunks, refs = rag.rag_retrieve(qv, expected_fields=None)
-        answer = rag.gpt_style_answer(q, context_chunks)
+        answer = rag.gpt_style_answer(q, context_chunks, history=history)
+    else:
+        match, score, ar, idx = rag.dataset_match(q, qv)
 
-    return {
-        "answer": answer,
-        "references": refs
-    }
+        if match and score >= rag.SIM_THRESHOLD:
+            answer = match["ar_a"] if ar else match["en_a"]
+            fields = match["field"]
+            _, refs = rag.rag_retrieve(qv, fields)
+        else:
+            context_chunks, refs = rag.rag_retrieve(qv, expected_fields=None)
+            answer = rag.gpt_style_answer(q, context_chunks)
+
+    return {"answer": answer, "references": refs}
