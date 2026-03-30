@@ -21,8 +21,8 @@ MIN_AUTHORITY = 0.65
 MAX_GPT_TOKENS = 600
 
 # [Fix 2] The metadata field name in Pinecone that holds the document text.
-# ⚠️ Check your actual Pinecone metadata — common names: "text", "content", "chunk", "passage"
-PINECONE_TEXT_FIELD = "text"
+# ⚠️ Check your actual Pinecone metadata — common names: "chunk_text", "title", "source_type", "authority_score", "source_path"
+PINECONE_TEXT_FIELD = "chunk_text"
 
 client = OpenAI()
 pc = Pinecone()
@@ -159,7 +159,7 @@ def _extract_text(md):
     Falls back through alternatives if PINECONE_TEXT_FIELD is not found.
     ⚠️ If retrieval returns empty chunks, check your actual Pinecone field names.
     """
-    for field in [PINECONE_TEXT_FIELD, "content", "chunk", "passage", "body"]:
+    for field in [PINECONE_TEXT_FIELD, "chunk_text", "title", "source_type", "authority_score", "source_path"]:
         val = md.get(field, "")
         if val:
             return str(val).strip()
