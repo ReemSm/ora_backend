@@ -36,19 +36,24 @@ def ask(req: AskRequest):
             "references": []
         }
 
-    # ✅ NORMAL FLOW (unchanged)
-    match, score, ar, idx = rag.dataset_match(q)
+    # [Fix 3] Compute query embedding exactly once.
+    # This single vector is reused by both dataset_match() and rag_retrieve()
+    # — previously each function triggered its own embed() call.
+    qv = rag.embed(q)
+    match, score, ar, idx = rag.dataset_match(q, qv)
 
     if match and score >= rag.SIM_THRESHOLD:
+        # Dataset answer is pre-written — use it directly.
+        # Still run rag_retrieve() for display references.
         answer = match["ar_a"] if ar else match["en_a"]
-        rag_query = match["ar_q"] if ar else match["en_q"]
         fields = match["field"]
-    else:
-        answer = rag.gpt_style_answer(q)
-        rag_query = q
-        fields = None
+        _, refs = rag.rag_retrieve(qv, fields)
 
-    refs = rag.rag_refs(rag_query, fields)
+    else:
+        # [Fix 2] GPT fallback: retrieve document content FIRST, then pass it
+        # into gpt_style_answer() so GPT answers from real sources, not memory.
+        context_chunks, refs = rag.rag_retrieve(qv, expected_fields=None)
+        answer = rag.gpt_style_answer(q, context_chunks)
 
     return {
         "answer": answer,
