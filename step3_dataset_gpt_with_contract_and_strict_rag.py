@@ -4,240 +4,265 @@ import logging
 from openai import OpenAI
 from pinecone import Pinecone
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[ORA %(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s")
 log = logging.getLogger("ora")
 
-# ========= CONFIG =========
-MODEL                = "gpt-5.2"
-EMBED_MODEL          = "text-embedding-3-large"
 
-SIM_THRESHOLD        = 0.70
-PINECONE_INDEX       = "oraapp111"
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+MODEL                    = "gpt-4o"         # replace with your deployed model name
+EMBED_MODEL              = "text-embedding-3-large"
+PINECONE_INDEX           = "oraapp111"
 
-TOP_K_RAW            = 5
-TOP_K_FINAL          = 3
-MIN_AUTHORITY        = 0.65
-MAX_GPT_TOKENS       = 450
-MIN_REF_DISPLAY      = 0.72
+SIM_THRESHOLD            = 0.70
+MIN_RELEVANCE            = 0.28             # below this → Pinecone says off-topic
+MIN_AUTHORITY            = 0.40             # lowered — 0.65 was dropping valid chunks
+TOP_K_RAW                = 6
+TOP_K_FINAL              = 3
+MAX_GPT_TOKENS           = 380
+MIN_REF_DISPLAY          = 0.70
 
-# [Fix 1/2] Lowered from 0.45 → 0.32.
-# The previous threshold was blocking short but valid dental questions
-# ("pain that comes and goes") and single-word follow-ups ("Is it dangerous?")
-# that have naturally low vector similarity to specific documents
-# but are still semantically within the dental domain.
-MIN_RELEVANCE        = 0.32
-
-PINECONE_TEXT_FIELD  = "chunk_text"
+# ── Confirmed Pinecone metadata field names ───────────────────────────────────
+# These are the exact field names confirmed by the user.
+# Changing any of these will break RAG silently.
+PINECONE_CHUNK_FIELD     = "chunk_text"       # THIS was the root cause of chunks_injected=0
+PINECONE_TITLE_FIELD     = "title"
+PINECONE_SOURCE_FIELD    = "source_type"
+PINECONE_AUTHORITY_FIELD = "authority_score"
+PINECONE_PATH_FIELD      = "source_path"
 
 client = OpenAI()
 pc     = Pinecone()
 index  = pc.Index(PINECONE_INDEX)
 
 
-# ========= DATASET =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  STATIC DATASET  (fast-path for common questions)
+# ─────────────────────────────────────────────────────────────────────────────
 DATASET = [
     {
         "field": ["Periodontics"],
         "en_q": "My gums bleed when I brush, what should I do?",
         "en_a": (
-            "Bleeding gums are usually a sign of gingival inflammation — the gum tissue "
-            "is irritated by plaque, a sticky bacterial film that builds up on teeth. "
-            "Mild cases cause redness and slight bleeding; advanced cases can involve swelling "
-            "and recession. The key is consistent oral hygiene: brush twice daily with correct "
-            "technique, and floss daily to clean between teeth where brushing cannot reach. "
-            "If plaque is left undisturbed it hardens into calculus, which only a dentist can remove. "
-            "A professional cleaning and checkup every six months helps prevent progression."
+            "Bleeding gums usually mean the gum tissue is inflamed from plaque — a sticky bacterial "
+            "film that builds up on teeth. Mild cases show redness and slight bleeding; advanced cases "
+            "can involve swelling and recession. The fix is consistent hygiene: brush twice daily with "
+            "correct technique and floss daily to reach between teeth. Plaque left undisturbed hardens "
+            "into calculus, which only a dentist can remove. A professional cleaning every six months "
+            "prevents progression."
         ),
-        "ar_q": "نزيف اللثة عادة ما يكون مؤشرا على وجود التهاب",
+        "ar_q": "نزيف اللثة",
         "ar_a": (
             "نزيف اللثة في الغالب علامة على التهابها بسبب تراكم البلاك — طبقة لزجة من البكتيريا "
             "تتكوّن على الأسنان. في الحالات البسيطة يظهر احمرار ونزيف خفيف، وفي الحالات المتقدمة "
-            "قد يصير فيه تورم. الحل هو الاهتمام بنظافة الفم: تفريش منتظم مرتين يومياً بطريقة صحيحة، "
-            "واستخدام خيط الأسنان يومياً لتنظيف ما بين الأسنان. البلاك إذا بقي يتكلّس ويصير جيراً "
-            "ما يزيله إلا التنظيف عند طبيب الأسنان. يُنصح بزيارة دورية كل ستة أشهر للفحص والتنظيف."
-        )
+            "قد يصير فيه تورم وانحسار. الحل هو الانتظام في نظافة الفم: تفريش مرتين يومياً بطريقة "
+            "صحيحة، واستخدام خيط الأسنان يومياً. البلاك إذا بقي يتكلّس ويصير جيراً ما يزيله إلا "
+            "التنظيف عند طبيب الأسنان. يُنصح بزيارة دورية كل ستة أشهر."
+        ),
     },
     {
         "field": ["Implant", "Periodontics"],
         "en_q": "I had a dental implant and notice bluish discoloration on my gum, is that normal?",
         "en_a": (
-            "Bluish discoloration near an implant is common in patients with naturally thin gum "
-            "tissue — when the tissue is thin enough, the metallic components show through. "
-            "This is an anatomical variation, not a sign of infection or implant failure. "
-            "It is primarily an aesthetic concern. A periodontist or implant specialist can assess "
-            "whether soft tissue correction would be appropriate."
+            "Bluish discoloration near an implant is common when the surrounding gum tissue is "
+            "naturally thin — the metallic components show through the tissue. This is an anatomical "
+            "variation, not a sign of infection or implant failure. It is primarily an aesthetic "
+            "concern. A periodontist or implant specialist can assess whether soft tissue correction "
+            "is appropriate."
         ),
-        "ar_q": "بعد ما سويت زرعة صار عندي لون أزرق في اللثة",
+        "ar_q": "بعد الزرعة صار عندي لون أزرق في اللثة",
         "ar_a": (
-            "اللون الأزرق بالقرب من الزرعة يصير في الغالب عند من تكون لثتهم رقيقة بطبيعتها، "
-            "وهذا يخلي المكونات المعدنية للزرعة تبيّن من خلال النسيج. هذا تغيّر تشريحي طبيعي "
-            "وما هو علامة على فشل الزرعة أو التهاب — في أغلب الأحيان هو مسألة مظهرية بس. "
-            "لو كان يضايقك، تقدر تراجع طبيب متخصص في أمراض اللثة أو زراعة الأسنان ليقيّم "
-            "إذا كان التدخل مناسب."
-        )
+            "اللون الأزرق بالقرب من الزرعة يصير في الغالب عند من تكون لثتهم رقيقة بطبيعتها — "
+            "المكونات المعدنية للزرعة تبيّن من خلال النسيج الرقيق. هذا تغيّر تشريحي طبيعي وما هو "
+            "علامة على فشل الزرعة أو التهاب، هو في الغالب مسألة مظهرية. لو كان يضايقك، طبيب "
+            "متخصص في أمراض اللثة يقدر يقيّم إذا كان التدخل مناسب."
+        ),
     },
     {
         "field": ["Restorative Dentistry"],
-        "en_q": "I had a filling and now I feel pain only when biting, what does it mean?",
+        "en_q": "I had a filling and now feel pain only when biting. What does it mean?",
         "en_a": (
-            "Pain only when biting after a filling usually means the restoration is slightly too high — "
-            "called high occlusion. The filling contacts the opposing tooth before the rest of the bite "
-            "does, creating localized pressure when chewing. Unlike general sensitivity, this pain is "
-            "specific to biting force. A quick adjustment at your dentist appointment resolves it."
+            "Pain only when biting after a filling usually means the restoration sits slightly too high "
+            "— called a high occlusion. The filling contacts the opposing tooth before the rest of the "
+            "bite does, creating localised pressure when chewing. Unlike general sensitivity, this pain "
+            "is specific to biting force. A quick adjustment at your next dentist visit resolves it."
         ),
-        "ar_q": "بعد الحشوة صار عندي ألم عند العض فقط",
+        "ar_q": "بعد الحشوة عندي ألم عند العض فقط",
         "ar_a": (
-            "الألم عند العض فقط بعد الحشوة يعني في الغالب إن الحشوة مرتفعة شوي عن مستواها الصحيح — "
-            "يعني تلامس السن المقابل قبل بقية الأسنان، وهذا يسبب ضغطاً موضعياً أثناء المضغ. "
-            "هذا يختلف عن الحساسية العامة لأن الألم مرتبط بقوة العض تحديداً. "
-            "تعديل بسيط عند طبيب الأسنان يحل المشكلة."
-        )
+            "الألم عند العض فقط بعد الحشوة يعني في الغالب إن الحشوة مرتفعة شوي — تلامس السن "
+            "المقابل قبل بقية الأسنان، وهذا يسبب ضغطاً موضعياً أثناء المضغ. هذا يختلف عن "
+            "الحساسية العامة لأن الألم مرتبط بقوة العض تحديداً. تعديل بسيط عند طبيب الأسنان "
+            "يحل المشكلة."
+        ),
     },
     {
         "field": ["Endodontics"],
-        "en_q": "I experienced severe tooth pain that disappeared without treatment. What does it mean?",
+        "en_q": "I had severe tooth pain that disappeared on its own. What does it mean?",
         "en_a": (
-            "When severe tooth pain disappears on its own, it often indicates the pulp — "
-            "the nerve-containing tissue inside the tooth — has lost vitality. "
-            "As the nerve dies, pain signals stop, but the underlying bacterial infection continues. "
-            "This is not recovery; the infection can spread beyond the root if left untreated. "
-            "An evaluation is necessary even when there is no pain."
+            "When severe tooth pain disappears on its own, it often means the pulp — the "
+            "nerve-containing tissue inside the tooth — has lost vitality. As the nerve dies, pain "
+            "signals stop, but the bacterial infection continues. This is not recovery; the infection "
+            "can spread beyond the root if left untreated. An evaluation is necessary even without pain."
         ),
-        "ar_q": "اختفى الألم الشديد في السن",
+        "ar_q": "اختفى الألم الشديد في السن من تلقاء نفسه",
         "ar_a": (
-            "اختفاء الألم من تلقاء نفسه ما يعني الشفاء. في الغالب يعني إن اللب — "
-            "نسيج العصب داخل السن — فقد حيويته، فلما يموت العصب تتوقف الإشارات المؤلمة، "
-            "بس العدوى البكتيرية تستمر. لو تُركت دون علاج يمكن تمتد العدوى خارج جذر السن. "
-            "المراجعة ضرورية حتى في غياب الألم."
-        )
+            "اختفاء الألم من تلقاء نفسه ما يعني الشفاء. في الغالب يعني إن لب السن — نسيج العصب "
+            "بداخله — فقد حيويته. لما يموت العصب تتوقف الإشارات المؤلمة، بس العدوى البكتيرية "
+            "تستمر. لو تُركت دون علاج يمكن تمتد خارج جذر السن. المراجعة ضرورية حتى في غياب "
+            "الألم."
+        ),
     },
     {
         "field": ["Endodontics"],
-        "en_q": "What does it mean that a tooth rots?",
+        "en_q": "What does tooth decay actually mean?",
         "en_a": (
-            "The term 'rotting' is informal and often misunderstood. What actually happens is that "
-            "bacteria invade the inner layers of the tooth — the dentin or pulp — usually following "
-            "untreated decay or trauma. The tooth does not literally decompose, but ongoing bacterial "
-            "activity causes progressive structural damage. The appropriate treatment depends on how "
-            "far the infection has progressed."
+            "Tooth decay means bacteria have invaded the inner layers of the tooth — the dentin or "
+            "pulp — usually after untreated early-stage cavities or trauma. The tooth does not "
+            "literally decompose, but ongoing bacterial activity causes progressive structural damage. "
+            "How far it has progressed determines what treatment is needed."
         ),
-        "ar_q": "هل تعني كلمة تعفن السن أن السن ميت؟",
+        "ar_q": "ما معنى تسوس أو تعفن السن؟",
         "ar_a": (
-            "مصطلح التعفن مو دقيق طبياً. اللي يصير فعلاً هو إن البكتيريا تخترق الطبقات الداخلية "
-            "للسن — الدنتين أو اللب — عادةً بسبب تسوس متقدم أو صدمة. السن ما تتحلل حرفياً، "
-            "بس النشاط البكتيري يسبب تلفاً تدريجياً في بنيتها. "
-            "العلاج المناسب يعتمد على مدى تقدم العدوى."
-        )
-    }
+            "التسوس يعني إن البكتيريا اخترقت الطبقات الداخلية للسن — الدنتين أو اللب — عادةً بسبب "
+            "تسوس سطحي لم يُعالج في وقته أو بسبب صدمة. السن ما تتحلل حرفياً، بس النشاط البكتيري "
+            "يسبب تلفاً تدريجياً في بنيتها. العلاج يعتمد على مدى تقدم التسوس."
+        ),
+    },
 ]
 
 
-# ========= SCOPE & SAFETY =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  SCOPE & SAFETY
+# ─────────────────────────────────────────────────────────────────────────────
+
 def is_ar(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text))
 
 
+# Hard non-dental topics — terms that are NEVER dental-relevant.
+# Keep this list narrow. Ambiguous terms (coffee, smoking, nutrition) are NOT
+# listed here because they can be dental-relevant. Scope enforcement at the GPT
+# level handles any remaining off-topic queries.
 _NON_DENTAL_BLOCK = [
     # English
-    "capital of", "weather forecast", "stock price", "bitcoin", "crypto",
-    "movie", "film", "music", "song", "recipe", "cooking", "bake",
-    "football", "basketball", "soccer", "rugby", "politics", "president",
-    "prime minister", "election", "travel", "hotel", "flight", "airline",
-    "restaurant", "penthouse", "real estate", "property investment",
-    "porsche", "ferrari", "bmw", "toyota", "mercedes", "audi", "honda", "tesla",
-    "car model", "vehicle specs", "phone", "iphone", "android",
-    "laptop", "computer programming", "software development",
+    "capital of", "weather forecast", "stock price", "stock market",
+    "bitcoin", "cryptocurrency", "crypto trading",
+    "movie review", "film review", "best movie", "watch a movie",
+    "music playlist", "song lyrics",
+    "football score", "basketball game", "soccer match", "rugby score",
+    "political party", "president of", "prime minister", "election results",
+    "flight booking", "airline ticket", "hotel booking", "travel itinerary",
+    "how to travel to", "best hotel in",
+    "real estate investment", "property price", "buy a house",
+    "porsche", "ferrari", "lamborghini", "bugatti",
+    "car review", "vehicle specs", "best car model",
+    "iphone review", "android phone review", "laptop specs", "best laptop",
+    "software development", "coding tutorial", "how to code", "programming language",
+    "recipe for", "how to cook", "how to bake", "cooking tips",
+    "investment advice", "stock portfolio",
+    "interior design", "penthouse",
     # Arabic
-    "عاصمة", "الطقس", "أسهم", "بيتكوين", "عملة رقمية", "فيلم",
-    "موسيقى", "وصفة طبخ", "كرة القدم", "مباراة رياضية", "سياسة",
-    "رئيس الدولة", "انتخابات", "سفر للخارج", "فندق", "طيران", "مطعم",
-    "بورش", "فيراري", "جوال", "هاتف ذكي", "برمجة", "شقة فارهة", "عقار"
+    "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين",
+    "عملة رقمية", "أفضل فيلم", "كلمات أغنية",
+    "نتيجة مباراة كرة", "سياسة الدولة", "رئيس الوزراء",
+    "نتائج انتخابات", "حجز فندق", "تذكرة طيران",
+    "استثمار عقاري", "سعر العقار", "شراء شقة",
+    "بورش", "فيراري", "لامبورغيني",
+    "مواصفات سيارة", "أفضل سيارة",
+    "وصفة طبخ", "كيفية الطبخ", "برمجة تطبيقات",
+    "استثمار في الأسهم", "شقة فارهة",
 ]
 
-# [Fix 1/2] Expanded with pain/symptom terms and additional Arabic dental vocabulary.
-# General symptom terms (pain, swelling, bleed) are included because in this application's
-# context, they are almost always dental-related. Short follow-ups like
-# "Is it dangerous?" are handled by the history context check, not by this list.
+# Dental signals — presence of ANY of these in a query bypasses scope checking.
+# Broad symptom terms (pain, swelling, bleeding) are intentionally included:
+# in a dental app, any mention of these is assumed to be dental-related.
+# This prevents false blocks on queries like "pain that comes and goes".
 _DENTAL_SIGNALS = [
-    # English - conditions and procedures
+    # English — anatomy, procedures, instruments
     "tooth", "teeth", "gum", "gums", "mouth", "oral", "dental", "dentist",
     "jaw", "bite", "biting", "cavity", "filling", "crown", "implant",
     "root canal", "braces", "plaque", "enamel", "dentin", "pulp",
     "extraction", "wisdom", "molar", "incisor", "premolar", "canine",
-    "veneer", "whitening", "bleaching", "floss", "toothbrush",
+    "veneer", "whitening", "bleaching", "floss", "toothbrush", "toothpaste",
     "gingiv", "periodon", "endodon", "orthodon", "calculus", "tartar",
     "abscess", "deep cleaning", "scaling", "anesthesia", "x-ray",
     "panoramic", "space maintainer", "retainer", "denture", "bridge",
-    "alveolar", "pericoronitis", "caries", "pulpitis", "gingivitis",
-    "periodontitis", "bone graft", "sinus lift", "fluoride", "sealant",
-    "occlusion", "malocclusion", "tmj", "clench", "grind", "bruxism",
-    # English - general symptoms valid in dental context
-    "pain", "ache", "aching", "hurt", "hurts", "hurting",
-    "swelling", "swollen", "swell", "bleed", "bleeding",
-    "sensitive", "sensitivity", "numb", "numbness", "sore", "soreness",
+    "pericoronitis", "caries", "pulpitis", "gingivitis", "periodontitis",
+    "bone graft", "sinus lift", "fluoride", "sealant",
+    "occlusion", "malocclusion", "tmj", "bruxism", "clench", "grind",
+    "gauze", "post-op", "aftercare", "socket",
+    # English — broad symptoms (dental by context in this app)
+    "pain", "ache", "aching", "toothache", "hurt", "hurts", "hurting",
+    "swollen", "swelling", "swell",
+    "bleed", "bleeding", "bleeds",
+    "sensitive", "sensitivity",
+    "numb", "numbness",
+    "sore", "soreness",
     "discomfort", "throbbing",
-    # Arabic - conditions and procedures
-    "سن", "أسنان", "لثة", "فم", "طبيب الأسنان", "طبيب أسنان",
-    "حشوة", "حشوات", "تاج", "زرعة", "علاج العصب", "تقويم",
-    "تبييض", "جير", "ضرس", "نزيف اللثة", "حساسية الأسنان",
-    "البلاك", "خيط الأسنان", "التهاب اللثة", "تسوس", "خلع",
-    "تنظيف عميق", "تقليح", "تلميع", "حافظ مسافة", "مثبت",
-    "طقم أسنان", "جسر أسنان", "تخدير", "التهاب حول التاج",
-    "خراج", "كيس", "فك", "عظم السنخي", "تلاصق الأسنان",
-    "قشرة", "ابتسامة هوليود", "رحى", "ناب", "قاطعة",
-    "حكة اللثة", "انحسار اللثة", "فلور", "سيلنت",
-    # Arabic - general symptoms valid in dental context
-    "ألم", "يؤلم", "يؤلمني", "وجع", "تورم", "خدر",
-    "نزيف", "حساسية", "إحساس", "أشعر", "لاحظت",
+    # Arabic — anatomy, procedures
+    "سن", "أسنان", "ضرس", "ضروس", "لثة", "فم", "فكّ", "فك",
+    "طبيب أسنان", "طبيب الأسنان", "عيادة الأسنان",
+    "حشوة", "حشوات", "تاج", "زرعة",
+    "علاج العصب", "تقويم", "تبييض",
+    "جير الأسنان", "البلاك", "خيط الأسنان",
+    "التهاب اللثة", "تسوس", "خلع",
+    "تنظيف عميق", "تقليح", "تلميع",
+    "حافظ مسافة", "مثبت", "طقم أسنان", "جسر أسنان",
+    "تخدير", "بنج", "إبرة التخدير",
+    "التهاب حول التاج", "خراج", "كيس",
+    "انحسار اللثة", "قشرة", "ابتسامة هوليود",
+    "رحى", "ناب", "قاطعة", "ضاحكة",
+    "فلور", "سيلنت", "قطعة شاش", "شاش",
+    # Arabic — broad symptoms (dental by context)
+    "ألم", "وجع", "يؤلم", "يؤلمني", "مؤلم",
+    "تورم", "منتفخ", "انتفاخ",
+    "نزيف", "ينزف", "نزف",
+    "حساسية",
+    "خدر",
+    "أشعر", "أحس", "لاحظت",
+    "يؤذي", "مؤلم",
 ]
 
-
-# [Fix 3] Now uses narrow regex patterns targeting only directive prescribing language.
-# This approach is symmetric — the same function handles both Arabic and English input.
-# Educational questions about medications (side effects, alternatives, dosage ranges,
-# commonly used antibiotics) are no longer caught.
+# Narrow patterns targeting ONLY direct prescribing directives.
+# Educational questions (what antibiotic, dosage ranges, side effects) are
+# intentionally NOT caught here — they are allowed.
 _PRESCRIPTION_PATTERNS = [
-    # English — direct prescribing directive
-    r"prescribe\s+me\b",
+    r"prescribe\s+(me\s+)?(a\s+)?medication",
     r"write\s+(me\s+)?a\s+prescription",
-    r"give\s+me\s+(a\s+specific\s+)?(prescription|medicine\s+for\s+my\s+case)",
-    r"make\s+(me\s+)?a\s+(treatment|care)\s+plan\s+for\s+(me|my)",
-    r"tell\s+me\s+exactly\s+what\s+(drug|medication|antibiotic)\s+to\s+take",
-    r"diagnose\s+(my\s+case|what\s+i\s+have|me)\s+exactly",
-    # Arabic — direct prescribing directive
-    r"وصف\s+لي\s+دواء",
-    r"وصّف\s+لي",
-    r"اعطني\s+وصفة\s+طبية",
-    r"أعطني\s+وصفة",
-    r"اكتب\s+لي\s+وصفة",
-    r"ابي\s+وصفة\s+طبية",
-    r"أبغى\s+وصفة",
+    r"give\s+me\s+a\s+specific\s+(prescription|treatment\s+plan)",
+    r"make\s+(me\s+)?a\s+(treatment|care)\s+plan\s+for\s+(me|my\s+case)",
+    r"tell\s+me\s+exactly\s+what\s+(drug|medication|antibiotic)\s+to\s+take\s+for\s+my",
+    r"diagnose\s+me\s+exactly",
+    r"وصّف\s+لي\s+دواء",
+    r"وصف\s+لي\s+دواء\s+بالضبط",
+    r"اعطني\s+وصفة\s+طبية\s+لحالتي",
+    r"أعطني\s+وصفة\s+لحالتي",
+    r"اكتب\s+لي\s+خطة\s+علاج",
     r"شخّص\s+حالتي\s+بالضبط",
-    r"شخص\s+حالتي",
 ]
+
 
 def is_treatment_request(q: str) -> bool:
     ql = q.lower()
     return any(re.search(p, ql) for p in _PRESCRIPTION_PATTERNS)
 
+
 def is_out_of_scope(q: str) -> bool:
     ql = q.lower()
     return any(b in ql for b in _NON_DENTAL_BLOCK)
 
+
 def has_dental_signal(text: str) -> bool:
     tl = text.lower()
-    return any(sig in tl for sig in _DENTAL_SIGNALS)
+    return any(sig.lower() in tl for sig in _DENTAL_SIGNALS)
+
 
 def history_has_dental_context(history: list) -> bool:
     """
-    [Fix 2] Returns True if any prior turn contains dental content.
-    When True, the current follow-up question inherits dental scope and must
-    NOT be independently re-evaluated for scope. A short follow-up like
-    "Is it dangerous?" has no dental keywords on its own but is implicitly
-    dental because of what preceded it.
+    Returns True if any prior turn contains dental content.
+    When True, the current follow-up inherits dental scope — scope gates
+    are bypassed entirely and history is passed to GPT for context.
     """
     for turn in history:
         content = turn.get("content", "")
@@ -245,56 +270,150 @@ def history_has_dental_context(history: list) -> bool:
             return True
     return False
 
+
 def refusal_treatment(q: str) -> str:
     return (
-        "ما أقدر أوصف أدوية أو أقدم تشخيصاً مباشراً. "
-        "للحصول على العلاج المناسب، يُنصح بمراجعة طبيب أسنان."
+        "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. للعلاج المناسب، يُنصح بمراجعة طبيب أسنان."
         if is_ar(q) else
-        "I cannot prescribe medication or provide a direct diagnosis. "
+        "I can't prescribe medication or provide a personalised diagnosis. "
         "Please consult a licensed dentist."
     )
 
+
 def refusal_scope(q: str) -> str:
-    # [Fix 7] Short, neutral, non-defensive. One sentence only.
     return (
         "هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان."
         if is_ar(q) else
-        "This question is outside the scope of this oral health application."
+        "This is outside the scope of this oral health application."
     )
 
 
-# ========= QUESTION TYPE =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  SOCIAL / CONVERSATIONAL INTENT
+#  Short-circuits before RAG and GPT for simple social exchanges.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SOCIAL_EN = [
+    r"^(hi|hello|hey|good\s*(morning|afternoon|evening|day))[\s!.,?]*$",
+    r"^(thanks|thank\s*you|thank\s*u|thx|tysm)[\s!.,?]*$",
+    r"^(ok|okay|got\s*it|alright|understood|makes\s*sense|sounds\s*good|great|perfect)[\s!.,?]*$",
+    r"^(yes|no|yep|nope|sure|of\s*course|certainly)[\s!.,?]*$",
+    r"^(bye|goodbye|see\s*you|take\s*care)[\s!.,?]*$",
+    r"(i\s+(have|got|'ve\s+got)\s+a\s+question)",
+    r"(i\s+have\s+a\s+question\s+for\s+you)",
+    r"(can\s+i\s+ask(\s+you)?(\s+something)?[\s?]*$)",
+    r"^i'm\s+(at\s+the\s+dentist|ready|here|listening)[\s!.,?]*$",
+]
+
+_SOCIAL_AR = [
+    r"^(مرحبا|أهلاً|أهلا|هلا|السلام\s*عليكم|صباح\s*الخير|مساء\s*الخير)[\s!.,؟]*$",
+    r"^(شكرًا|شكراً|شكرا|ممنون|مشكور|يسلموا|يعطيك\s*العافية)[\s!.,؟]*$",
+    r"^(حسناً|حسنًا|تمام|زين|ماشي|فاهم|واضح|أوكي|اوكي|صح|نعم|أيوه|لا)[\s!.,؟]*$",
+    r"^(مع\s*السلامة|وداعاً|باي)[\s!.,؟]*$",
+    r"(عندي\s+سؤال)",
+    r"(أبغى\s+أسأل|بغيت\s+أسأل|ودي\s+أسأل|أريد\s+أن\s+أسأل)",
+]
+
+
+def is_social_exchange(q: str) -> bool:
+    ql = q.lower().strip()
+    for p in _SOCIAL_EN:
+        if re.search(p, ql, re.IGNORECASE):
+            return True
+    for p in _SOCIAL_AR:
+        if re.search(p, q.strip()):
+            return True
+    return False
+
+
+def social_response(q: str) -> str:
+    ar = is_ar(q)
+    ql = q.lower().strip()
+    if ar:
+        if re.search(r"شكر|ممنون|مشكور|يسلموا|يعطيك", q):
+            return "على الرحب والسعة."
+        if re.search(r"السلام عليكم", q):
+            return "وعليكم السلام! كيف أقدر أساعدك؟"
+        if re.search(r"مرحبا|أهلاً|أهلا|هلا|صباح|مساء", q):
+            return "أهلاً! كيف أقدر أساعدك في صحة أسنانك؟"
+        if re.search(r"مع السلامة|وداعاً|باي", q):
+            return "مع السلامة!"
+        if re.search(r"عندي سؤال|أبغى أسأل|بغيت أسأل|ودي أسأل", q):
+            return "تفضل، أنا أسمعك."
+        return "تفضل."
+    else:
+        if re.search(r"thanks|thank\s*you|thx", ql):
+            return "You're welcome."
+        if re.search(r"^(hi|hello|hey)", ql):
+            return "Hello! How can I help you with your dental health today?"
+        if re.search(r"bye|goodbye|see\s*you", ql):
+            return "Take care!"
+        if re.search(r"(have|got)\s+a\s+question|question\s+for\s+you|can\s+i\s+ask", ql):
+            return "Go ahead."
+        if re.search(r"i'm\s+(at|ready|here|listening)", ql):
+            return "Go ahead, I'm listening."
+        return "Of course, go ahead."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  QUESTION TYPE
+# ─────────────────────────────────────────────────────────────────────────────
+
 def detect_question_type(q: str) -> str:
-    ql = q.lower()
-    _instruction_signals = [
-        "how to", "how do i", "what should i do", "aftercare",
-        "after surgery", "after extraction", "after root canal", "after implant",
-        "after filling", "after procedure", "steps", "instructions",
-        "what to do after", "can i eat", "can i drink", "when can i",
-        "كيف", "ماذا أفعل", "ماذا يجب", "تعليمات", "خطوات",
-        "بعد العملية", "بعد الخلع", "بعد التركيب", "بعد الزرعة",
-        "بعد الحشوة", "بعد التنظيف", "ايش أسوي", "كيف أعتني",
-        "هل أقدر آكل", "هل أقدر أشرب", "متى أقدر", "ماذا أفعل بعد"
+    """
+    instruction  → aftercare, how-to steps, what to do after a procedure
+    symptom      → first-person symptom report
+    informational → everything else (what is X, is it dangerous, how does X work)
+
+    "Is it dangerous?" resolves to informational — short prose, no bullets.
+    "I have pain that comes and goes" resolves to symptom.
+    """
+    ql = q.lower().strip()
+
+    _INSTRUCTION = [
+        "how to", "how do i",
+        "aftercare", "after care",
+        "after surgery", "after extraction", "after root canal",
+        "after implant", "after filling", "after procedure", "after treatment",
+        "step by step", "what to do after",
+        "can i eat", "can i drink", "when can i eat", "when can i drink",
+        "كيف أعتني", "كيف أتعامل", "كيف أتصرف",
+        "ماذا أفعل بعد", "بعد العملية", "بعد الخلع",
+        "بعد التركيب", "بعد الزرعة", "بعد الحشوة", "بعد التنظيف",
+        "ايش أسوي بعد", "وش أسوي بعد",
+        "هل أقدر آكل بعد", "هل أقدر أشرب بعد", "متى أقدر آكل",
+        "تعليمات بعد", "خطوات العناية",
     ]
-    _symptom_signals = [
-        "pain", "hurt", "hurts", "bleed", "bleeding", "swell", "swelling",
-        "ache", "sensitive", "sensitivity", "discomfort", "feel", "notice",
-        "throbbing", "numb", "numbness",
-        "ألم", "يؤلم", "يؤلمني", "نزيف", "تورم", "حساسية",
-        "أشعر", "لاحظت", "وجع", "يحس", "خدر"
+
+    _SYMPTOM = [
+        "i have", "i feel", "i notice", "i noticed",
+        "i'm feeling", "i've been", "i experience", "i experienced",
+        "my tooth", "my teeth", "my gum", "my gums", "my mouth", "my jaw",
+        "pain that", "pain when", "pain in my",
+        "عندي ألم", "عندي تورم", "عندي نزيف",
+        "أشعر ب", "أحس ب", "لاحظت في",
+        "سني يؤلم", "أسناني تؤلم", "لثتي تؤلم",
+        "يؤلمني",
     ]
-    for s in _instruction_signals:
+
+    for s in _INSTRUCTION:
         if s in ql:
             return "instruction"
-    for s in _symptom_signals:
+
+    for s in _SYMPTOM:
         if s in ql:
             return "symptom"
+
     return "informational"
 
 
-# ========= EMBEDDING =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  EMBEDDING
+# ─────────────────────────────────────────────────────────────────────────────
+
 def embed(text: str) -> list:
     return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+
 
 def cosine(a: list, b: list) -> float:
     dot = sum(x * y for x, y in zip(a, b))
@@ -302,20 +421,25 @@ def cosine(a: list, b: list) -> float:
     nb  = math.sqrt(sum(x * x for x in b))
     return dot / (na * nb) if na and nb else 0.0
 
+
 log.info("Pre-computing dataset embeddings...")
 _DS_EN_VECS = [embed(d["en_q"]) for d in DATASET]
 _DS_AR_VECS = [embed(d["ar_q"]) for d in DATASET]
 log.info(f"Done — {len(DATASET)} entries cached.")
 
 
-# ========= INTENT SHORTCUTS =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  DATASET SHORTCUT
+# ─────────────────────────────────────────────────────────────────────────────
+
 INTENT_PHRASES = {
     0: ["gum bleed", "bleeding gums", "نزيف اللثة", "اللثة تنزف", "لثتي تنزف"],
-    1: ["blue gum", "implant color", "زرعة", "زرقة اللثة"],
-    2: ["pain when biting", "after filling", "ألم عند العض", "بعد الحشوة"],
-    3: ["pain disappeared", "اختفى الألم", "راح الألم"],
-    4: ["tooth rotting", "تعفن السن", "السن ميت"]
+    1: ["blue gum implant", "implant color", "زرقة اللثة بعد الزرعة"],
+    2: ["pain when biting", "pain only when biting", "ألم عند العض"],
+    3: ["pain disappeared", "tooth pain went away", "اختفى الألم", "راح الألم"],
+    4: ["tooth rotting", "rotten tooth", "تعفن السن", "السن ميت"],
 }
+
 
 def dataset_match(q: str, qv=None):
     q_norm = q.lower().strip()
@@ -335,23 +459,35 @@ def dataset_match(q: str, qv=None):
     return best, score, ar, best_idx
 
 
-# ========= RAG RETRIEVAL =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  RAG RETRIEVAL
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _extract_text(md: dict) -> str:
-    for field in [PINECONE_TEXT_FIELD, "content", "chunk", "passage", "body"]:
-        val = md.get(field, "")
-        if val:
-            log.debug(f"RAG text field='{field}' len={len(str(val))}")
-            return str(val).strip()
-    log.warning(f"RAG: no text found. Available fields: {list(md.keys())}")
+    """
+    Reads chunk text from the confirmed metadata field: PINECONE_CHUNK_FIELD = "chunk_text"
+
+    If this function returns empty string for every chunk, the constant above is wrong.
+    Check the log output — it will print the fields that ARE present in your metadata.
+    That was the sole cause of chunks_injected=0 in previous versions.
+    """
+    val = md.get(PINECONE_CHUNK_FIELD, "")
+    if val:
+        return str(val).strip()
+
+    # Only reached if chunk_text is absent — log fields present to diagnose
+    log.error(
+        f"RAG _extract_text: field '{PINECONE_CHUNK_FIELD}' missing or empty. "
+        f"Fields present in this chunk: {list(md.keys())}. "
+        f"Update PINECONE_CHUNK_FIELD if your schema changed."
+    )
     return ""
 
-def rag_retrieve(qv: list, expected_fields=None):
+
+def rag_retrieve(qv: list):
     """
     Returns (context_chunks, display_titles, is_off_topic, debug_info).
-
-    debug_info is a dict intended for server-side logging and the API's
-    hidden _debug field. It gives you real-time confirmation that RAG
-    content is being retrieved and injected — see the verification guide below.
+    debug_info is included in every API response under _debug for server-side verification.
     """
     res     = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
     matches = res.get("matches", [])
@@ -362,218 +498,258 @@ def rag_retrieve(qv: list, expected_fields=None):
         "chunks_injected": 0,
         "authority_filter_dropped": 0,
         "fallback_used": False,
+        "field_errors": 0,
     }
 
     if not matches:
-        log.info("RAG: no matches from Pinecone")
+        log.info("RAG: 0 matches returned by Pinecone")
         return [], [], False, debug_info
 
     top_score = float(matches[0].get("score", 0))
     debug_info["top_score"] = round(top_score, 4)
-    log.info(f"RAG top_score={top_score:.3f} threshold={MIN_RELEVANCE}")
+    log.info(f"RAG: top_score={top_score:.4f}  threshold={MIN_RELEVANCE}")
 
     if top_score < MIN_RELEVANCE:
-        log.info("RAG: off-topic — score below MIN_RELEVANCE")
+        log.info("RAG: off-topic — top_score below MIN_RELEVANCE")
         return [], [], True, debug_info
 
-    strong = []
+    accepted = []
     for m in matches:
         score = float(m.get("score", 0))
         md    = m.get("metadata", {})
 
-        auth = float(md.get("authority_score", -1))
-        if auth == -1:
-            # [Fix 5] Warn if authority_score is missing entirely — this would silently
-            # drop all chunks. If you see this warning consistently, the metadata schema
-            # in Pinecone does not include this field and MIN_AUTHORITY should be disabled.
-            log.warning(f"RAG: 'authority_score' missing. Fields present: {list(md.keys())}")
-
-        if auth != -1 and auth < MIN_AUTHORITY:
-            debug_info["authority_filter_dropped"] += 1
-            continue
-
-        specialty = str(md.get("specialty", "")).lower()
-        if expected_fields and not any(f.lower() in specialty for f in expected_fields):
-            continue
+        # Authority filter — skip only when field is present AND below threshold
+        raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
+        if raw_auth is not None:
+            try:
+                auth = float(raw_auth)
+                if auth < MIN_AUTHORITY:
+                    debug_info["authority_filter_dropped"] += 1
+                    log.debug(f"RAG: dropped chunk authority={auth:.2f} < {MIN_AUTHORITY}")
+                    continue
+            except (TypeError, ValueError):
+                log.warning(f"RAG: invalid authority_score value: {raw_auth!r} — chunk accepted")
 
         text = _extract_text(md)
-        strong.append({"title": md.get("title", ""), "text": text, "score": score})
+        if not text:
+            debug_info["field_errors"] += 1
+            continue
 
-    # [Fix 5] If authority/specialty filtering drops everything, fall back to raw results.
-    # This prevents silent empty context — the model would otherwise answer from base
-    # knowledge with no indication that RAG failed.
-    if not strong and matches:
-        log.warning("RAG: all chunks filtered — falling back to unfiltered top results")
+        accepted.append({
+            "title": str(md.get(PINECONE_TITLE_FIELD, "")),
+            "text":  text,
+            "score": score,
+        })
+
+    # Fallback: if authority filter removed everything, use unfiltered results
+    if not accepted and matches:
+        log.warning(
+            f"RAG: all {len(matches)} chunks dropped by authority filter "
+            f"(MIN_AUTHORITY={MIN_AUTHORITY}). Falling back to unfiltered."
+        )
         debug_info["fallback_used"] = True
         for m in matches[:TOP_K_FINAL]:
-            text = _extract_text(m.get("metadata", {}))
-            strong.append({
-                "title": m.get("metadata", {}).get("title", ""),
-                "text": text,
-                "score": float(m.get("score", 0))
-            })
+            md   = m.get("metadata", {})
+            text = _extract_text(md)
+            if text:
+                accepted.append({
+                    "title": str(md.get(PINECONE_TITLE_FIELD, "")),
+                    "text":  text,
+                    "score": float(m.get("score", 0)),
+                })
 
+    # Deduplicate
     seen, unique = set(), []
-    for s in strong:
-        key = s["title"] or s["text"][:60]
+    for chunk in accepted:
+        key = chunk["title"] or chunk["text"][:80]
         if key not in seen:
             seen.add(key)
-            unique.append(s)
+            unique.append(chunk)
 
-    context_chunks = [s["text"] for s in unique if s["text"]][:TOP_K_FINAL]
+    context_chunks = [c["text"]  for c in unique[:TOP_K_FINAL]]
     display_titles = [
-        s["title"] for s in unique
-        if s["title"] and s["score"] >= MIN_REF_DISPLAY
+        c["title"] for c in unique
+        if c["title"] and c["score"] >= MIN_REF_DISPLAY
     ][:TOP_K_FINAL]
 
     debug_info["chunks_injected"] = len(context_chunks)
     log.info(
-        f"RAG: chunks_injected={len(context_chunks)} "
-        f"authority_dropped={debug_info['authority_filter_dropped']} "
-        f"fallback={debug_info['fallback_used']} "
-        f"refs_displayed={len(display_titles)}"
+        f"RAG: injected={len(context_chunks)}  "
+        f"authority_dropped={debug_info['authority_filter_dropped']}  "
+        f"fallback={debug_info['fallback_used']}  "
+        f"field_errors={debug_info['field_errors']}"
     )
 
     return context_chunks, display_titles, False, debug_info
 
 
-# ========= GPT GENERATION =========
-# [Fix 8] Pre-built constant — format prohibitions are now a fixed string,
-# not constructed inside the function. This ensures they are always identical
-# across language paths and question types (eliminates the symmetry risk).
+# ─────────────────────────────────────────────────────────────────────────────
+#  GPT GENERATION
+# ─────────────────────────────────────────────────────────────────────────────
+
 _FORBIDDEN = (
-    "STRICTLY FORBIDDEN — do not use any of these in your response:\n"
-    "- Numbered lists (1. 2. 3.)\n"
-    "- Markdown headings (## / ### / bold titles)\n"
-    "- Bold text (**word** or __word__)\n"
-    "- Asterisk bullets (* item)\n"
-    "- Section-divider colons used as headers\n"
-    "- Summary or conclusion paragraphs of any kind "
-    "(e.g. 'In summary', 'To summarize', 'خلاصة', 'خلاصة القول', 'ختاماً', 'باختصار')\n"
-    "Your answer must end naturally after the last relevant point — no closing remarks.\n"
+    "STRICTLY FORBIDDEN — never use any of the following:\n"
+    "• Numbered lists (1. 2. 3.) or lettered lists\n"
+    "• Markdown headings (# ## ###) or bold text used as section titles\n"
+    "• Hyphens as bullet markers (- item) — use only • when bullets are needed\n"
+    "• Summary or conclusion paragraphs — any phrase that signals wrapping up: "
+    "'In summary', 'To summarize', 'Overall', 'In conclusion', "
+    "'خلاصة', 'خلاصة القول', 'ختاماً', 'باختصار', 'في الختام' are all banned\n"
+    "• Closing remarks or any text added after the final content sentence\n"
+    "Your response ends at the last relevant sentence. Nothing follows it.\n"
 )
+
 
 def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
     ar    = is_ar(q)
     qtype = detect_question_type(q)
 
-    # --- RAG context ---
+    # ── RAG context ───────────────────────────────────────────────────────────
     if context_chunks:
         ctx = (
-            "\n\nREFERENCE MATERIAL — this is your primary source:\n"
+            "\n\nREFERENCE MATERIAL — prioritise this over general knowledge:\n"
             + "\n---\n".join(context_chunks)
-            + "\n\n"
-            "You may fill gaps using only clinical facts standard in accredited dental school "
-            "curricula. Do NOT include home remedies (tea bags, clove oil as standalone treatment, "
-            "saline rinse as the only post-op instruction, etc.) unless they appear in the reference "
-            "material above. If unsure whether a fact meets this standard, omit it.\n"
+            + "\n\nSupplement with established clinical dental knowledge only where "
+            "the reference material has gaps. Do NOT include home remedies or folk advice "
+            "unless they appear above.\n"
         )
     else:
         ctx = (
-            "\n\nNo reference material retrieved. Answer from established clinical dental "
-            "knowledge — standard textbook protocols only. "
-            "Do NOT include home remedies or folk-sourced advice.\n"
+            "\n\nNo retrieved reference material. "
+            "Answer from established clinical dental knowledge (standard protocols only). "
+            "Do NOT include home remedies or folk advice.\n"
         )
 
-    # --- Format ---
-    if qtype == "instruction":
-        fmt = "FORMAT: Hyphen bullet points ( - ) ONLY. Each point is one clear, actionable sentence.\n"
-        length = "LENGTH: 4 to 6 bullet points. No more, no fewer.\n"
-        disclaimer = ""
-    elif qtype == "symptom":
-        fmt = "FORMAT: Plain prose only. No bullet points.\n"
-        length = "LENGTH: 3 to 5 sentences maximum.\n"
-        disclaimer = "End with one sentence recommending a dental consultation.\n"
+    # ── Format — language-aware, consistent ──────────────────────────────────
+    if ar:
+        if qtype == "instruction":
+            fmt = (
+                "FORMAT: استخدم الرمز • فقط لكل نقطة — جملة واحدة واضحة وقابلة للتطبيق لكل نقطة.\n"
+                "LENGTH: من 4 إلى 6 نقاط كحد أقصى.\n"
+            )
+        elif qtype == "symptom":
+            fmt = (
+                "FORMAT: نثر مباشر فقط — بدون نقاط أو قوائم.\n"
+                "LENGTH: من 3 إلى 4 جمل فقط.\n"
+                "اختم بجملة واحدة قصيرة تنصح فيها بمراجعة طبيب الأسنان.\n"
+            )
+        else:
+            fmt = (
+                "FORMAT: نثر مباشر فقط — بدون نقاط أو قوائم.\n"
+                "LENGTH: من 2 إلى 3 جمل فقط.\n"
+            )
     else:
-        fmt = "FORMAT: Plain prose only. No bullet points.\n"
-        length = "LENGTH: 2 to 4 sentences maximum.\n"
-        disclaimer = "End with one brief sentence recommending a dental consultation.\n"
+        if qtype == "instruction":
+            fmt = (
+                "FORMAT: Use the • character for each bullet — "
+                "one clear, actionable sentence per bullet.\n"
+                "LENGTH: 4 to 6 bullets maximum.\n"
+            )
+        elif qtype == "symptom":
+            fmt = (
+                "FORMAT: Plain prose only — no bullet points, no lists.\n"
+                "LENGTH: 3 to 4 sentences maximum.\n"
+                "End with one brief sentence recommending a dental consultation.\n"
+            )
+        else:
+            fmt = (
+                "FORMAT: Plain prose only — no bullet points, no lists.\n"
+                "LENGTH: 2 to 3 sentences maximum.\n"
+            )
 
-    # --- Alarmism ---
-    alarmism = (
-        "ESCALATION WARNINGS: Do not append warnings like 'if pain worsens see a dentist' "
-        "or 'if symptoms persist consult a professional'. Add urgent advice ONLY when the "
-        "user explicitly describes: uncontrolled bleeding, fever alongside dental pain, "
-        "or difficulty breathing or swallowing. For all other questions, omit escalation "
-        "language entirely.\n"
+    # ── Scope — last GPT-level defence ───────────────────────────────────────
+    scope = (
+        "SCOPE: You are a dental health assistant only. "
+        "If the question is clearly unrelated to oral or dental health, respond with exactly: "
+        "'This is outside the scope of this oral health application.' (English) "
+        "or 'هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان.' (Arabic). Nothing more.\n"
     )
 
-    # --- Language ---
-    # [Fix 6/9] Arabic and English instructions are now symmetric in structure.
-    # Both permit educational medication content. Both apply the same format rules.
-    # Arabic tone is now anchored by a positive description of the target register
-    # with concrete term examples, rather than a list of prohibitions.
+    # ── Focus / length discipline ────────────────────────────────────────────
+    focus = (
+        "FOCUS: Answer only what was asked — nothing more. "
+        "Do not proactively mention x-rays, follow-up appointments, or additional procedures "
+        "unless the user explicitly asked about them. "
+        "A short specific question should get a short specific answer.\n"
+    )
+
+    # ── Alarmism control ─────────────────────────────────────────────────────
+    alarmism = (
+        "ALARMISM: Do not add 'if symptoms worsen, see a dentist' or similar warnings "
+        "unless the user explicitly describes uncontrolled bleeding, fever with dental pain, "
+        "or difficulty breathing or swallowing. Omit escalation language for all other questions.\n"
+    )
+
+    # ── Differential diagnosis ───────────────────────────────────────────────
+    differential = (
+        "DIFFERENTIAL: When symptoms are vague or could have multiple causes, briefly name "
+        "the 2–3 most likely possibilities before elaborating. "
+        "Never commit to a single diagnosis from a vague description. "
+        "Use language like 'this is often caused by...', 'common causes include...'.\n"
+    )
+
+    # ── Medication education ─────────────────────────────────────────────────
+    medication = (
+        "MEDICATION: You may freely discuss: antibiotics commonly used in dentistry, "
+        "alternatives for penicillin allergy, general safe OTC dosage ranges for ibuprofen "
+        "and paracetamol, medication side effects, IV vs oral antibiotic use, and "
+        "weight-based dosage estimation for reference. "
+        "Do NOT prescribe for a specific patient or write a personalised treatment plan.\n"
+    )
+
+    # ── Language and tone ────────────────────────────────────────────────────
+    # Arabic: scalable register description with positive examples — not a prohibition list.
+    # English: symmetric structure, same depth.
     if ar:
         lang = (
-            "LANGUAGE: Write in natural, professional Arabic with a Gulf register. "
-            "The tone should feel like a knowledgeable dentist speaking plainly and "
-            "warmly to a patient — not formal or academic (avoid 'حيث أن', 'إذ إن', "
-            "'الجدير بالذكر', 'تجدر الإشارة'), and not slang. "
-            "Natural Gulf expressions like 'بس', 'فعلاً', 'لما', 'يصير', 'فيه', "
-            "'بدون ما', 'تقدر' are appropriate when they fit naturally — do not force them.\n"
-            "Use these natural Arabic dental terms exactly as written:\n"
-            "  قطعة شاش or شاش (gauze — NOT 'شاش ضاغط'),\n"
-            "  حشوة (filling), علاج العصب (root canal),\n"
-            "  تاج (crown), تنظيف الجير (scaling),\n"
-            "  تبييض الأسنان (whitening), خيط الأسنان (floss),\n"
-            "  زرعة (implant), البلاك (plaque), خلع (extraction).\n"
-            "Do NOT write English dental terms mid-sentence as a style default. "
-            "If an English term is genuinely helpful (the patient may have heard it at clinic), "
-            "place it in parentheses after the Arabic on first use only.\n"
+            "LANGUAGE AND TONE:\n"
+            "Write in natural Gulf Arabic. "
+            "The tone should feel like a knowledgeable dentist speaking directly and warmly "
+            "to a patient — calm, clear, professional, human. Not academic. Not slang.\n"
+            "\n"
+            "Key principles:\n"
+            "• Use the most natural, commonly heard Arabic equivalent for every term. "
+            "Ask yourself: what would a patient naturally say at a Gulf dental clinic? Use that.\n"
+            "• Do not insert English mid-sentence by default. "
+            "If a term is widely known by its English name at clinics (e.g. X-ray), "
+            "write the Arabic first, then English in parentheses on first mention only.\n"
+            "• Never translate word-for-word from English. "
+            "Use the phrase a native Arabic speaker would actually say.\n"
+            "• Gulf connectors — بس، لما، يصير، فيه، تقدر، فعلاً — "
+            "are appropriate when they fit naturally. Do not force them.\n"
+            "• Standard natural terms to use exactly as shown: "
+            "قطعة شاش (gauze), حشوة (filling), علاج العصب (root canal), "
+            "تاج (crown), تنظيف الجير (scaling), تبييض (whitening), "
+            "خيط الأسنان (floss), زرعة (implant), خلع (extraction), "
+            "ضرس العقل (wisdom tooth).\n"
         )
     else:
         lang = (
-            "LANGUAGE: Plain English for a non-dental adult. "
-            "Briefly define any technical term the first time you use it. "
-            "Warm, calm, professional tone — like a knowledgeable friend explaining clearly.\n"
+            "LANGUAGE AND TONE: Plain, clear English for a non-dental adult. "
+            "Calm, professional, and warm — like a knowledgeable friend who explains things "
+            "clearly without being clinical or academic. "
+            "Briefly define technical terms the first time you use them.\n"
         )
 
-    # --- Diagnostic approach ---
-    # [Fix 4] Prevents single-condition lock-in for vague symptoms.
-    differential = (
-        "DIFFERENTIAL APPROACH: When a symptom is vague or could stem from multiple causes, "
-        "briefly state the 2-3 most likely possibilities before discussing them. "
-        "Do not commit to one diagnosis from a vague description. "
-        "For example, wisdom tooth pain could indicate pericoronitis, decay, "
-        "impaction pressure on adjacent teeth, or referred pain — name the possibilities "
-        "before elaborating. Use language like 'common causes include...', "
-        "'this is often due to...', or 'the most likely explanation, though not the only one, is...'.\n"
-    )
-
-    # --- Medication education ---
-    # [Fix 3] Explicit permission for educational medication content.
-    # Symmetric — applies regardless of language.
-    medication = (
-        "MEDICATION EDUCATION: You MAY discuss the following without restriction:\n"
-        "- Which antibiotics are commonly used for specific dental conditions\n"
-        "- Alternatives for patients with penicillin allergy\n"
-        "- General safe dosage ranges for OTC analgesics (ibuprofen, paracetamol)\n"
-        "- Side effects of dental medications\n"
-        "- When dentists use IV versus oral antibiotics\n"
-        "- Weight-based dosage estimation (state it is for reference/verification only)\n"
-        "You may NOT: prescribe medication for a specific patient's case, "
-        "write a personal treatment plan, or state a definitive diagnosis.\n"
-    )
-
-    # --- Core system prompt ---
+    # ── Assemble system prompt ────────────────────────────────────────────────
     system = (
-        "You are ORA, a dental health assistant for general patients — not dental professionals.\n"
-        "Give accurate, specific, and genuinely useful dental information in a clear human tone.\n"
-        "\nCORE RULES:\n"
-        "- Be specific. Explain the likely cause and the physiological mechanism behind it.\n"
-        "- You MAY explain: likely causes, clinical meaning of a condition, how it develops, "
-        "what treatment approaches generally exist, what a dentist visit for this typically involves.\n"
-        "- You may NOT: prescribe specific medication, recommend dosages for a specific patient, "
-        "or state a definitive diagnosis as certain.\n"
-        "- Frame uncertain claims with 'typically', 'often', or 'in most cases'.\n"
-        "- Do NOT claim insufficient information when general clinical dental knowledge exists.\n"
-        "- Do NOT ask the user any follow-up questions.\n"
-        "- If prior conversation is in the input, use it to understand context "
-        "before answering the current message.\n"
+        "You are ORA, a dental health assistant for general patients.\n"
+        "Give accurate, specific, genuinely useful dental information.\n"
         "\n"
+        "CORE RULES:\n"
+        "• Explain likely causes and the mechanism behind them.\n"
+        "• You may explain: causes, clinical meaning, how conditions develop, "
+        "what treatment generally involves, what a dental visit typically looks like.\n"
+        "• You may NOT: prescribe for a specific patient, write a personalised treatment plan, "
+        "state a definitive diagnosis as certain.\n"
+        "• Use 'typically', 'often', 'in most cases' for uncertain claims.\n"
+        "• Do NOT claim insufficient information when standard clinical knowledge exists.\n"
+        "• Do NOT ask the user any follow-up questions.\n"
+        "• Use conversation history to understand the context of the current message.\n"
+        "\n"
+        + scope
+        + focus
         + fmt
-        + length
-        + disclaimer
         + alarmism
         + differential
         + medication
@@ -582,9 +758,10 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         + ctx
     )
 
+    # Build message list — cap history to last 8 turns to avoid token bloat
     msgs = [{"role": "system", "content": system}]
     if history:
-        for turn in history:
+        for turn in history[-8:]:
             role    = turn.get("role", "")
             content = turn.get("content", "")
             if role in ("user", "assistant") and content:
@@ -596,43 +773,37 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
             model=MODEL,
             reasoning={"effort": "low"},
             input=msgs,
-            max_output_tokens=MAX_GPT_TOKENS
+            max_output_tokens=MAX_GPT_TOKENS,
         )
         return r.output_text.strip()
-
     except Exception as e:
         log.error(f"GPT error: {e}")
         return (
-            "عذرًا، حدث خطأ في معالجة سؤالك. يُنصح بمراجعة طبيب أسنان مرخص."
+            "عذرًا، حدث خطأ. يُنصح بمراجعة طبيب أسنان."
             if ar else
             "Sorry, an error occurred. Please consult a licensed dentist."
         )
 
 
-# ========= MAIN (CLI) =========
+# ─────────────────────────────────────────────────────────────────────────────
+#  CLI (testing only)
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     q = input("> ").strip()
 
     if is_treatment_request(q):
         print(refusal_treatment(q))
-        exit()
-
-    if is_out_of_scope(q):
-        print(refusal_scope(q))
-        exit()
-
-    qv = embed(q)
-    match, score, ar, idx = dataset_match(q, qv)
-
-    if match and score >= SIM_THRESHOLD:
-        answer = match["ar_a"] if ar else match["en_a"]
-        _, refs, _, debug = rag_retrieve(qv, match["field"])
+    elif is_social_exchange(q):
+        print(social_response(q))
     else:
-        context_chunks, refs, is_off_topic, debug = rag_retrieve(qv)
-        if is_off_topic and not has_dental_signal(q):
-            print(refusal_scope(q))
-            exit()
-        answer = gpt_style_answer(q, context_chunks)
-
-    print(answer)
-    log.info(f"RAG debug: {debug}")
+        qv               = embed(q)
+        match, score, ar, idx = dataset_match(q, qv)
+        if match and score >= SIM_THRESHOLD:
+            print(match["ar_a"] if ar else match["en_a"])
+        else:
+            ctx, refs, off_topic, debug = rag_retrieve(qv)
+            if off_topic and not has_dental_signal(q):
+                print(refusal_scope(q))
+            else:
+                print(gpt_style_answer(q, ctx))
+            log.info(f"debug: {debug}")
