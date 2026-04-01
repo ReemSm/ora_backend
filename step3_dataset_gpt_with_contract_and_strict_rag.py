@@ -11,26 +11,28 @@ log = logging.getLogger("ora")
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-MODEL                    = "gpt-4o"         # replace with your deployed model name
+MODEL                    = "gpt-4o"
 EMBED_MODEL              = "text-embedding-3-large"
 PINECONE_INDEX           = "oraapp111"
 
 SIM_THRESHOLD            = 0.70
-MIN_RELEVANCE            = 0.28             # below this → Pinecone says off-topic
-MIN_AUTHORITY            = 0.40             # lowered — 0.65 was dropping valid chunks
+MIN_RELEVANCE            = 0.28
+MIN_AUTHORITY            = 0.40
 TOP_K_RAW                = 6
 TOP_K_FINAL              = 3
 MAX_GPT_TOKENS           = 380
 MIN_REF_DISPLAY          = 0.70
 
 # ── Confirmed Pinecone metadata field names ───────────────────────────────────
-# These are the exact field names confirmed by the user.
-# Changing any of these will break RAG silently.
-PINECONE_CHUNK_FIELD     = "chunk_text"       # THIS was the root cause of chunks_injected=0
+PINECONE_CHUNK_FIELD     = "chunk_text"
 PINECONE_TITLE_FIELD     = "title"
 PINECONE_SOURCE_FIELD    = "source_type"
 PINECONE_AUTHORITY_FIELD = "authority_score"
 PINECONE_PATH_FIELD      = "source_path"
+
+# ── Fallback field names tried if PINECONE_CHUNK_FIELD is absent ──────────────
+# These are tried in order. The system never hard-crashes due to a missing field.
+_CHUNK_FALLBACK_FIELDS   = ("text", "content", "chunk", "body", "passage", "page_content")
 
 client = OpenAI()
 pc     = Pinecone()
@@ -38,7 +40,7 @@ index  = pc.Index(PINECONE_INDEX)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STATIC DATASET  (fast-path for common questions)
+#  STATIC DATASET
 # ─────────────────────────────────────────────────────────────────────────────
 DATASET = [
     {
@@ -140,12 +142,7 @@ def is_ar(text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FF]", text))
 
 
-# Hard non-dental topics — terms that are NEVER dental-relevant.
-# Keep this list narrow. Ambiguous terms (coffee, smoking, nutrition) are NOT
-# listed here because they can be dental-relevant. Scope enforcement at the GPT
-# level handles any remaining off-topic queries.
 _NON_DENTAL_BLOCK = [
-    # English
     "capital of", "weather forecast", "stock price", "stock market",
     "bitcoin", "cryptocurrency", "crypto trading",
     "movie review", "film review", "best movie", "watch a movie",
@@ -162,7 +159,6 @@ _NON_DENTAL_BLOCK = [
     "recipe for", "how to cook", "how to bake", "cooking tips",
     "investment advice", "stock portfolio",
     "interior design", "penthouse",
-    # Arabic
     "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين",
     "عملة رقمية", "أفضل فيلم", "كلمات أغنية",
     "نتيجة مباراة كرة", "سياسة الدولة", "رئيس الوزراء",
@@ -174,12 +170,7 @@ _NON_DENTAL_BLOCK = [
     "استثمار في الأسهم", "شقة فارهة",
 ]
 
-# Dental signals — presence of ANY of these in a query bypasses scope checking.
-# Broad symptom terms (pain, swelling, bleeding) are intentionally included:
-# in a dental app, any mention of these is assumed to be dental-related.
-# This prevents false blocks on queries like "pain that comes and goes".
 _DENTAL_SIGNALS = [
-    # English — anatomy, procedures, instruments
     "tooth", "teeth", "gum", "gums", "mouth", "oral", "dental", "dentist",
     "jaw", "bite", "biting", "cavity", "filling", "crown", "implant",
     "root canal", "braces", "plaque", "enamel", "dentin", "pulp",
@@ -192,7 +183,6 @@ _DENTAL_SIGNALS = [
     "bone graft", "sinus lift", "fluoride", "sealant",
     "occlusion", "malocclusion", "tmj", "bruxism", "clench", "grind",
     "gauze", "post-op", "aftercare", "socket",
-    # English — broad symptoms (dental by context in this app)
     "pain", "ache", "aching", "toothache", "hurt", "hurts", "hurting",
     "swollen", "swelling", "swell",
     "bleed", "bleeding", "bleeds",
@@ -200,7 +190,6 @@ _DENTAL_SIGNALS = [
     "numb", "numbness",
     "sore", "soreness",
     "discomfort", "throbbing",
-    # Arabic — anatomy, procedures
     "سن", "أسنان", "ضرس", "ضروس", "لثة", "فم", "فكّ", "فك",
     "طبيب أسنان", "طبيب الأسنان", "عيادة الأسنان",
     "حشوة", "حشوات", "تاج", "زرعة",
@@ -214,19 +203,15 @@ _DENTAL_SIGNALS = [
     "انحسار اللثة", "قشرة", "ابتسامة هوليود",
     "رحى", "ناب", "قاطعة", "ضاحكة",
     "فلور", "سيلنت", "قطعة شاش", "شاش",
-    # Arabic — broad symptoms (dental by context)
     "ألم", "وجع", "يؤلم", "يؤلمني", "مؤلم",
     "تورم", "منتفخ", "انتفاخ",
     "نزيف", "ينزف", "نزف",
     "حساسية",
     "خدر",
     "أشعر", "أحس", "لاحظت",
-    "يؤذي", "مؤلم",
+    "يؤذي",
 ]
 
-# Narrow patterns targeting ONLY direct prescribing directives.
-# Educational questions (what antibiotic, dosage ranges, side effects) are
-# intentionally NOT caught here — they are allowed.
 _PRESCRIPTION_PATTERNS = [
     r"prescribe\s+(me\s+)?(a\s+)?medication",
     r"write\s+(me\s+)?a\s+prescription",
@@ -259,11 +244,6 @@ def has_dental_signal(text: str) -> bool:
 
 
 def history_has_dental_context(history: list) -> bool:
-    """
-    Returns True if any prior turn contains dental content.
-    When True, the current follow-up inherits dental scope — scope gates
-    are bypassed entirely and history is passed to GPT for context.
-    """
     for turn in history:
         content = turn.get("content", "")
         if has_dental_signal(content):
@@ -290,7 +270,6 @@ def refusal_scope(q: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SOCIAL / CONVERSATIONAL INTENT
-#  Short-circuits before RAG and GPT for simple social exchanges.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SOCIAL_EN = [
@@ -360,14 +339,6 @@ def social_response(q: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_question_type(q: str) -> str:
-    """
-    instruction  → aftercare, how-to steps, what to do after a procedure
-    symptom      → first-person symptom report
-    informational → everything else (what is X, is it dangerous, how does X work)
-
-    "Is it dangerous?" resolves to informational — short prose, no bullets.
-    "I have pain that comes and goes" resolves to symptom.
-    """
     ql = q.lower().strip()
 
     _INSTRUCTION = [
@@ -399,11 +370,9 @@ def detect_question_type(q: str) -> str:
     for s in _INSTRUCTION:
         if s in ql:
             return "instruction"
-
     for s in _SYMPTOM:
         if s in ql:
             return "symptom"
-
     return "informational"
 
 
@@ -465,21 +434,53 @@ def dataset_match(q: str, qv=None):
 
 def _extract_text(md: dict) -> str:
     """
-    Reads chunk text from the confirmed metadata field: PINECONE_CHUNK_FIELD = "chunk_text"
+    BUG FIX: Previously hardcoded to a single field name, causing field_errors
+    and chunks_injected=0 whenever the actual field name differed.
 
-    If this function returns empty string for every chunk, the constant above is wrong.
-    Check the log output — it will print the fields that ARE present in your metadata.
-    That was the sole cause of chunks_injected=0 in previous versions.
+    Now tries PINECONE_CHUNK_FIELD first, then all fallback field names in order.
+    Never raises an exception. Logs the fields present when nothing works,
+    so you can identify the correct field name from server logs.
     """
-    val = md.get(PINECONE_CHUNK_FIELD, "")
-    if val:
-        return str(val).strip()
+    # Primary field — try this first
+    val = md.get(PINECONE_CHUNK_FIELD)
+    if val is not None:
+        text = str(val).strip()
+        if text:
+            return text
 
-    # Only reached if chunk_text is absent — log fields present to diagnose
+    # Fallback fields — tried in order if primary is missing or empty
+    for field in _CHUNK_FALLBACK_FIELDS:
+        val = md.get(field)
+        if val is not None:
+            text = str(val).strip()
+            if text:
+                log.warning(
+                    f"_extract_text: primary field '{PINECONE_CHUNK_FIELD}' was empty. "
+                    f"Used fallback field '{field}'. "
+                    f"Consider updating PINECONE_CHUNK_FIELD to '{field}'."
+                )
+                return text
+
+    # Last resort: find any string-valued field with substantial content
+    for key, val in md.items():
+        if key in (PINECONE_TITLE_FIELD, PINECONE_SOURCE_FIELD,
+                   PINECONE_AUTHORITY_FIELD, PINECONE_PATH_FIELD):
+            continue  # skip known non-text fields
+        if isinstance(val, str) and len(val.strip()) > 40:
+            text = val.strip()
+            log.warning(
+                f"_extract_text: no known text field found. "
+                f"Using field '{key}' as last resort (length={len(text)}). "
+                f"Update PINECONE_CHUNK_FIELD to '{key}'."
+            )
+            return text
+
+    # Nothing worked — log fields present so the correct name can be identified
     log.error(
-        f"RAG _extract_text: field '{PINECONE_CHUNK_FIELD}' missing or empty. "
-        f"Fields present in this chunk: {list(md.keys())}. "
-        f"Update PINECONE_CHUNK_FIELD if your schema changed."
+        f"_extract_text: could not extract text from metadata. "
+        f"Fields present: {list(md.keys())}. "
+        f"Current PINECONE_CHUNK_FIELD='{PINECONE_CHUNK_FIELD}'. "
+        f"Update PINECONE_CHUNK_FIELD to one of the above field names."
     )
     return ""
 
@@ -487,19 +488,25 @@ def _extract_text(md: dict) -> str:
 def rag_retrieve(qv: list):
     """
     Returns (context_chunks, display_titles, is_off_topic, debug_info).
-    debug_info is included in every API response under _debug for server-side verification.
+    Never crashes — all metadata access is guarded.
     """
-    res     = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
-    matches = res.get("matches", [])
-
     debug_info = {
-        "pinecone_match_count": len(matches),
+        "pinecone_match_count": 0,
         "top_score": None,
         "chunks_injected": 0,
         "authority_filter_dropped": 0,
         "fallback_used": False,
         "field_errors": 0,
     }
+
+    try:
+        res     = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
+        matches = res.get("matches", [])
+    except Exception as e:
+        log.error(f"Pinecone query failed: {e}")
+        return [], [], False, debug_info
+
+    debug_info["pinecone_match_count"] = len(matches)
 
     if not matches:
         log.info("RAG: 0 matches returned by Pinecone")
@@ -516,9 +523,10 @@ def rag_retrieve(qv: list):
     accepted = []
     for m in matches:
         score = float(m.get("score", 0))
-        md    = m.get("metadata", {})
+        md    = m.get("metadata") or {}
 
-        # Authority filter — skip only when field is present AND below threshold
+        # Authority filter — only applied when the field is present and parseable
+        # When absent, chunk passes automatically (safe default)
         raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
         if raw_auth is not None:
             try:
@@ -528,7 +536,10 @@ def rag_retrieve(qv: list):
                     log.debug(f"RAG: dropped chunk authority={auth:.2f} < {MIN_AUTHORITY}")
                     continue
             except (TypeError, ValueError):
-                log.warning(f"RAG: invalid authority_score value: {raw_auth!r} — chunk accepted")
+                log.warning(
+                    f"RAG: authority_score value '{raw_auth!r}' could not be parsed — "
+                    f"chunk accepted without authority check."
+                )
 
         text = _extract_text(md)
         if not text:
@@ -536,32 +547,44 @@ def rag_retrieve(qv: list):
             continue
 
         accepted.append({
-            "title": str(md.get(PINECONE_TITLE_FIELD, "")),
+            "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
             "text":  text,
             "score": score,
         })
 
-    # Fallback: if authority filter removed everything, use unfiltered results
+    # ── Fallback: authority filter removed everything ─────────────────────────
+    # Re-run without authority filter. This ensures Pinecone results are NEVER
+    # silently discarded due to a calibration issue in authority scores.
     if not accepted and matches:
         log.warning(
-            f"RAG: all {len(matches)} chunks dropped by authority filter "
-            f"(MIN_AUTHORITY={MIN_AUTHORITY}). Falling back to unfiltered."
+            f"RAG fallback: all chunks dropped by authority filter "
+            f"(dropped={debug_info['authority_filter_dropped']}, "
+            f"field_errors={debug_info['field_errors']}). "
+            f"Re-running without authority filter."
         )
         debug_info["fallback_used"] = True
-        for m in matches[:TOP_K_FINAL]:
-            md   = m.get("metadata", {})
-            text = _extract_text(md)
-            if text:
-                accepted.append({
-                    "title": str(md.get(PINECONE_TITLE_FIELD, "")),
-                    "text":  text,
-                    "score": float(m.get("score", 0)),
-                })
+        debug_info["field_errors"]  = 0  # reset to count only fallback errors
 
-    # Deduplicate
+        for m in matches[:TOP_K_FINAL]:
+            md    = m.get("metadata") or {}
+            text  = _extract_text(md)
+            if not text:
+                debug_info["field_errors"] += 1
+                continue
+            accepted.append({
+                "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
+                "text":  text,
+                "score": float(m.get("score", 0)),
+            })
+
+    if not accepted:
+        log.warning("RAG: no chunks injected after fallback.")
+        return [], [], False, debug_info
+
+    # Deduplicate by title, then by text prefix
     seen, unique = set(), []
     for chunk in accepted:
-        key = chunk["title"] or chunk["text"][:80]
+        key = chunk["title"] if chunk["title"] else chunk["text"][:80]
         if key not in seen:
             seen.add(key)
             unique.append(chunk)
@@ -620,7 +643,7 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
             "Do NOT include home remedies or folk advice.\n"
         )
 
-    # ── Format — language-aware, consistent ──────────────────────────────────
+    # ── Format — language-aware ───────────────────────────────────────────────
     if ar:
         if qtype == "instruction":
             fmt = (
@@ -657,7 +680,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
                 "LENGTH: 2 to 3 sentences maximum.\n"
             )
 
-    # ── Scope — last GPT-level defence ───────────────────────────────────────
     scope = (
         "SCOPE: You are a dental health assistant only. "
         "If the question is clearly unrelated to oral or dental health, respond with exactly: "
@@ -665,7 +687,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         "or 'هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان.' (Arabic). Nothing more.\n"
     )
 
-    # ── Focus / length discipline ────────────────────────────────────────────
     focus = (
         "FOCUS: Answer only what was asked — nothing more. "
         "Do not proactively mention x-rays, follow-up appointments, or additional procedures "
@@ -673,14 +694,12 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         "A short specific question should get a short specific answer.\n"
     )
 
-    # ── Alarmism control ─────────────────────────────────────────────────────
     alarmism = (
         "ALARMISM: Do not add 'if symptoms worsen, see a dentist' or similar warnings "
         "unless the user explicitly describes uncontrolled bleeding, fever with dental pain, "
         "or difficulty breathing or swallowing. Omit escalation language for all other questions.\n"
     )
 
-    # ── Differential diagnosis ───────────────────────────────────────────────
     differential = (
         "DIFFERENTIAL: When symptoms are vague or could have multiple causes, briefly name "
         "the 2–3 most likely possibilities before elaborating. "
@@ -688,7 +707,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         "Use language like 'this is often caused by...', 'common causes include...'.\n"
     )
 
-    # ── Medication education ─────────────────────────────────────────────────
     medication = (
         "MEDICATION: You may freely discuss: antibiotics commonly used in dentistry, "
         "alternatives for penicillin allergy, general safe OTC dosage ranges for ibuprofen "
@@ -697,9 +715,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         "Do NOT prescribe for a specific patient or write a personalised treatment plan.\n"
     )
 
-    # ── Language and tone ────────────────────────────────────────────────────
-    # Arabic: scalable register description with positive examples — not a prohibition list.
-    # English: symmetric structure, same depth.
     if ar:
         lang = (
             "LANGUAGE AND TONE:\n"
@@ -731,7 +746,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
             "Briefly define technical terms the first time you use them.\n"
         )
 
-    # ── Assemble system prompt ────────────────────────────────────────────────
     system = (
         "You are ORA, a dental health assistant for general patients.\n"
         "Give accurate, specific, genuinely useful dental information.\n"
@@ -758,7 +772,6 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         + ctx
     )
 
-    # Build message list — cap history to last 8 turns to avoid token bloat
     msgs = [{"role": "system", "content": system}]
     if history:
         for turn in history[-8:]:
@@ -768,14 +781,20 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
                 msgs.append({"role": role, "content": content})
     msgs.append({"role": "user", "content": q})
 
+    # ── BUG FIX: Use chat.completions.create for gpt-4o ──────────────────────
+    # The previous revision used client.responses.create with reasoning={} and
+    # input=msgs — that is the Responses API syntax for o-series models only.
+    # For gpt-4o the correct call is client.chat.completions.create with messages=.
+    # Using the wrong method raised an exception on every call, causing the
+    # "Sorry, an error occurred" fallback to fire for every single query.
     try:
-        r = client.responses.create(
+        r = client.chat.completions.create(
             model=MODEL,
-            reasoning={"effort": "low"},
-            input=msgs,
-            max_output_tokens=MAX_GPT_TOKENS,
+            messages=msgs,
+            max_tokens=MAX_GPT_TOKENS,
+            temperature=0.3,
         )
-        return r.output_text.strip()
+        return r.choices[0].message.content.strip()
     except Exception as e:
         log.error(f"GPT error: {e}")
         return (
