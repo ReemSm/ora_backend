@@ -34,10 +34,19 @@ PINECONE_PATH_FIELD      = "source_path"
 # These are tried in order. The system never hard-crashes due to a missing field.
 _CHUNK_FALLBACK_FIELDS   = ("text", "content", "chunk", "body", "passage", "page_content")
 
-client = OpenAI()
-pc     = Pinecone()
-index  = pc.Index(PINECONE_INDEX)
+import os
 
+# ── OpenAI ─────────────────────────────────────────────────────────────
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+# ── Pinecone ───────────────────────────────────────────────────────────
+pc = Pinecone(
+    api_key=os.getenv("PINECONE_API_KEY")
+)
+
+index = pc.Index(PINECONE_INDEX)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATIC DATASET
