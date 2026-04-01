@@ -513,7 +513,7 @@ def rag_retrieve(qv: list):
         matches = res.get("matches", [])
         for m in matches:
             log.info(f"METADATA KEYS: {list((m.get('metadata') or {}).keys())}")
-    break
+            break
     except Exception as e:
         log.error(f"Pinecone query failed: {e}")
         return [], [], False, debug_info
