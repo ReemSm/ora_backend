@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 
-import ra3 as rag
+import step3_dataset_gpt_with_contract_and_strict_rag as rag
 
 app = FastAPI()
 
