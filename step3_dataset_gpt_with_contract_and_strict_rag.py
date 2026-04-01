@@ -13,7 +13,7 @@ log = logging.getLogger("ora")
 # ─────────────────────────────────────────────────────────────────────────────
 MODEL                    = "gpt-4o"
 EMBED_MODEL              = "text-embedding-3-large"
-PINECONE_INDEX           = "oraapp111"
+PINECONE_INDEX           = "oraapp777"
 
 SIM_THRESHOLD            = 0.70
 MIN_RELEVANCE            = 0.28
