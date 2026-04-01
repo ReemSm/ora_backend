@@ -17,7 +17,7 @@ MAX_GPT_TOKENS       = 450     # [Fix 1/2] Reduced from 800: limits verbosity + 
 MIN_RELEVANCE        = 0.45    # [Fix 8/9] Below this score, query is likely off-topic
 MIN_REF_DISPLAY      = 0.72    # [Fix 8]   Only show references above this confidence
 
-PINECONE_TEXT_FIELD  = "text"
+PINECONE_TEXT_FIELD  = "chunk_text"
 
 client = OpenAI()
 pc     = Pinecone()
@@ -280,7 +280,7 @@ def _extract_text(md: dict) -> str:
     Logs the matched field name so you can verify PINECONE_TEXT_FIELD is correct.
     If you see the WARNING line, check the logged available fields and update the constant.
     """
-    for field in [PINECONE_TEXT_FIELD, "content", "chunk", "passage", "body"]:
+    for field in [PINECONE_TEXT_FIELD, "chunk_text", "title", "source_type", "authority_score", "source_path"]:
         val = md.get(field, "")
         if val:
             print(f"[ORA RAG] text field='{field}' len={len(str(val))}")
