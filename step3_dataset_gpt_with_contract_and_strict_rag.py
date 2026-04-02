@@ -1,7 +1,6 @@
 import re
 import math
 import logging
-import os
 from openai import OpenAI
 from pinecone import Pinecone
 
@@ -21,7 +20,7 @@ MIN_RELEVANCE            = 0.28
 MIN_AUTHORITY            = 0.40
 TOP_K_RAW                = 6
 TOP_K_FINAL              = 3
-MAX_GPT_TOKENS           = 520   # raised from 380 — needed for complete clinical answers
+MAX_GPT_TOKENS           = 380
 MIN_REF_DISPLAY          = 0.70
 
 # ── Confirmed Pinecone metadata field names ───────────────────────────────────
@@ -31,12 +30,23 @@ PINECONE_SOURCE_FIELD    = "source_type"
 PINECONE_AUTHORITY_FIELD = "authority_score"
 PINECONE_PATH_FIELD      = "source_path"
 
+# ── Fallback field names tried if PINECONE_CHUNK_FIELD is absent ──────────────
+# These are tried in order. The system never hard-crashes due to a missing field.
 _CHUNK_FALLBACK_FIELDS   = ("text", "content", "chunk", "body", "passage", "page_content")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-pc     = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index  = pc.Index(PINECONE_INDEX)
+import os
 
+# ── OpenAI ─────────────────────────────────────────────────────────────
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+# ── Pinecone ───────────────────────────────────────────────────────────
+pc = Pinecone(
+    api_key=os.getenv("PINECONE_API_KEY")
+)
+
+index = pc.Index(PINECONE_INDEX)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATIC DATASET
@@ -335,56 +345,35 @@ def social_response(q: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  QUESTION TYPE
-#  Determines response format: instruction → bullets, symptom → prose + referral,
-#  informational → prose. Expanded triggers ensure Arabic questions classify
-#  correctly instead of defaulting to informational.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_question_type(q: str) -> str:
     ql = q.lower().strip()
 
     _INSTRUCTION = [
-        # ── English ──────────────────────────────────────────────────────────
-        "how to", "how do i", "how should i",
-        "what should i do", "what do i do after", "what do i do if",
+        "how to", "how do i",
         "aftercare", "after care",
         "after surgery", "after extraction", "after root canal",
         "after implant", "after filling", "after procedure", "after treatment",
-        "step by step", "what to do after", "what to avoid", "what not to",
+        "step by step", "what to do after",
         "can i eat", "can i drink", "when can i eat", "when can i drink",
-        "should i brush", "should i rinse", "should i stop", "should i use",
-        "how many times", "how often should", "how long should i",
-        # ── Arabic ───────────────────────────────────────────────────────────
-        "كيف أعتني", "كيف أتعامل", "كيف أتصرف", "كيف أنظف", "كيف أستخدم",
-        "ماذا أفعل بعد", "ماذا أفعل إذا",
-        "وش أسوي", "ايش أسوي", "إيش أسوي",
-        "بعد العملية", "بعد الخلع", "بعد التركيب",
-        "بعد الزرعة", "بعد الحشوة", "بعد التنظيف", "بعد علاج العصب",
-        "هل أقدر آكل", "هل أقدر أشرب", "متى أقدر آكل", "متى أقدر أشرب",
+        "كيف أعتني", "كيف أتعامل", "كيف أتصرف",
+        "ماذا أفعل بعد", "بعد العملية", "بعد الخلع",
+        "بعد التركيب", "بعد الزرعة", "بعد الحشوة", "بعد التنظيف",
+        "ايش أسوي بعد", "وش أسوي بعد",
+        "هل أقدر آكل بعد", "هل أقدر أشرب بعد", "متى أقدر آكل",
         "تعليمات بعد", "خطوات العناية",
-        "ايش لازم أسوي", "وش لازم أسوي", "إيش لازم أسوي",
-        "كم مرة في اليوم", "كم مرة",
-        "ايش أتجنب", "وش أتجنب", "إيش أتجنب", "ايش ما يصير",
-        "هل لازم أ", "هل يجب أن أ",
-        "متى أقدر",
     ]
 
     _SYMPTOM = [
-        # ── English ──────────────────────────────────────────────────────────
         "i have", "i feel", "i notice", "i noticed",
         "i'm feeling", "i've been", "i experience", "i experienced",
         "my tooth", "my teeth", "my gum", "my gums", "my mouth", "my jaw",
-        "pain that", "pain when", "pain in my", "hurts when", "hurts after",
-        "there is pain", "there's pain", "there is swelling", "there's swelling",
-        "i can feel", "i can taste", "i can see a",
-        # ── Arabic ───────────────────────────────────────────────────────────
-        "عندي ألم", "عندي تورم", "عندي نزيف", "عندي حساسية",
+        "pain that", "pain when", "pain in my",
+        "عندي ألم", "عندي تورم", "عندي نزيف",
         "أشعر ب", "أحس ب", "لاحظت في",
-        "سني يؤلم", "أسناني تؤلم", "لثتي تؤلم", "فمي يؤلم",
-        "يؤلمني", "يوجعني", "يوجع", "يؤلم",
-        "صار عندي", "طلع عندي",
-        "من لما", "من يوم ما",
-        "منتفخ", "ينزف", "حاسس",
+        "سني يؤلم", "أسناني تؤلم", "لثتي تؤلم",
+        "يؤلمني",
     ]
 
     for s in _INSTRUCTION:
@@ -453,12 +442,22 @@ def dataset_match(q: str, qv=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_text(md: dict) -> str:
+    """
+    BUG FIX: Previously hardcoded to a single field name, causing field_errors
+    and chunks_injected=0 whenever the actual field name differed.
+
+    Now tries PINECONE_CHUNK_FIELD first, then all fallback field names in order.
+    Never raises an exception. Logs the fields present when nothing works,
+    so you can identify the correct field name from server logs.
+    """
+    # Primary field — try this first
     val = md.get(PINECONE_CHUNK_FIELD)
     if val is not None:
         text = str(val).strip()
         if text:
             return text
 
+    # Fallback fields — tried in order if primary is missing or empty
     for field in _CHUNK_FALLBACK_FIELDS:
         val = md.get(field)
         if val is not None:
@@ -471,10 +470,11 @@ def _extract_text(md: dict) -> str:
                 )
                 return text
 
+    # Last resort: find any string-valued field with substantial content
     for key, val in md.items():
         if key in (PINECONE_TITLE_FIELD, PINECONE_SOURCE_FIELD,
                    PINECONE_AUTHORITY_FIELD, PINECONE_PATH_FIELD):
-            continue
+            continue  # skip known non-text fields
         if isinstance(val, str) and len(val.strip()) > 40:
             text = val.strip()
             log.warning(
@@ -484,6 +484,7 @@ def _extract_text(md: dict) -> str:
             )
             return text
 
+    # Nothing worked — log fields present so the correct name can be identified
     log.error(
         f"_extract_text: could not extract text from metadata. "
         f"Fields present: {list(md.keys())}. "
@@ -536,6 +537,8 @@ def rag_retrieve(qv: list):
         score = float(m.get("score", 0))
         md    = m.get("metadata") or {}
 
+        # Authority filter — only applied when the field is present and parseable
+        # When absent, chunk passes automatically (safe default)
         raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
         if raw_auth is not None:
             try:
@@ -561,6 +564,9 @@ def rag_retrieve(qv: list):
             "score": score,
         })
 
+    # ── Fallback: authority filter removed everything ─────────────────────────
+    # Re-run without authority filter. This ensures Pinecone results are NEVER
+    # silently discarded due to a calibration issue in authority scores.
     if not accepted and matches:
         log.warning(
             f"RAG fallback: all chunks dropped by authority filter "
@@ -569,7 +575,7 @@ def rag_retrieve(qv: list):
             f"Re-running without authority filter."
         )
         debug_info["fallback_used"] = True
-        debug_info["field_errors"]  = 0
+        debug_info["field_errors"]  = 0  # reset to count only fallback errors
 
         for m in matches[:TOP_K_FINAL]:
             md    = m.get("metadata") or {}
@@ -587,6 +593,7 @@ def rag_retrieve(qv: list):
         log.warning("RAG: no chunks injected after fallback.")
         return [], [], False, debug_info
 
+    # Deduplicate by title, then by text prefix
     seen, unique = set(), []
     for chunk in accepted:
         key = chunk["title"] if chunk["title"] else chunk["text"][:80]
@@ -615,242 +622,157 @@ def rag_retrieve(qv: list):
 #  GPT GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
 
+_FORBIDDEN = (
+    "STRICTLY FORBIDDEN — never use any of the following:\n"
+    "• Numbered lists (1. 2. 3.) or lettered lists\n"
+    "• Markdown headings (# ## ###) or bold text used as section titles\n"
+    "• Hyphens as bullet markers (- item) — use only • when bullets are needed\n"
+    "• Summary or conclusion paragraphs — any phrase that signals wrapping up: "
+    "'In summary', 'To summarize', 'Overall', 'In conclusion', "
+    "'خلاصة', 'خلاصة القول', 'ختاماً', 'باختصار', 'في الختام' are all banned\n"
+    "• Closing remarks or any text added after the final content sentence\n"
+    "Your response ends at the last relevant sentence. Nothing follows it.\n"
+)
+
+
 def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
-    ar       = is_ar(q)
-    qtype    = detect_question_type(q)
-    has_hist = bool(history)
+    ar    = is_ar(q)
+    qtype = detect_question_type(q)
 
-    # ── Block 1: Language enforcement ─────────────────────────────────────────
-    # Placed FIRST in the system prompt so it takes top priority.
-    # For Arabic, any language mixing is a hard failure regardless of other rules.
-    if ar:
-        lang_enforce = (
-            "══ CRITICAL — LANGUAGE RULE — THIS OVERRIDES ALL OTHER INSTRUCTIONS ══\n"
-            "Your entire response MUST be written in Arabic only.\n"
-            "Do NOT use any English words, phrases, or sentences anywhere in your response.\n"
-            "The ONLY permitted exception: a widely-known clinical acronym such as X-ray or CT scan "
-            "may appear in English inside parentheses immediately after its Arabic name, "
-            "on first mention only. Example: أشعة إكس (X-ray) — permitted once.\n"
-            "Writing the word 'gauze' alone is NEVER permitted — always use قطعة شاش.\n"
-            "Writing any English medical term without an Arabic equivalent first is NEVER permitted.\n"
-            "══════════════════════════════════════════════════════════════════════\n\n"
-        )
-    else:
-        lang_enforce = ""
-
-    # ── Block 2: Conversation continuity ──────────────────────────────────────
-    # Explicitly tells GPT the current message is part of an ongoing conversation.
-    # Without this, GPT treats every turn as an isolated query.
-    if has_hist:
-        continuity = (
-            "CONVERSATION CONTINUITY:\n"
-            "The prior conversation turns are included below in the message list. "
-            "The user's current message is a continuation of this conversation. "
-            "It may be a follow-up question, a request for clarification, or a new angle "
-            "on the same topic discussed before. "
-            "Always interpret the current message in the context of what was already discussed. "
-            "Do NOT treat it as a standalone, context-free query. "
-            "Do NOT repeat information you already provided in this conversation "
-            "unless the user explicitly asks you to repeat or re-explain it.\n\n"
-        )
-    else:
-        continuity = ""
-
-    # ── Block 3: RAG context ──────────────────────────────────────────────────
-    # Framed as a mandatory grounding directive, not a soft suggestion.
-    # GPT must use specific details from retrieved passages, not substitute generic advice.
+    # ── RAG context ───────────────────────────────────────────────────────────
     if context_chunks:
         ctx = (
-            "══ REFERENCE MATERIAL — MANDATORY GROUNDING ══\n"
-            "The following passages were retrieved specifically for this question. "
-            "Your answer MUST be directly grounded in this material. "
-            "Use the specific details, steps, timeframes, and clinical recommendations "
-            "from these passages in your response. "
-            "Do NOT replace this content with generic advice when it already covers the topic. "
-            "Supplement with standard clinical dental knowledge only where the reference "
-            "has clear gaps. Do NOT include home remedies or folk advice unless they appear "
-            "in the reference material below.\n\n"
+            "\n\nREFERENCE MATERIAL — prioritise this over general knowledge:\n"
             + "\n---\n".join(context_chunks)
-            + "\n══════════════════════════════════════════\n\n"
+            + "\n\nSupplement with established clinical dental knowledge only where "
+            "the reference material has gaps. Do NOT include home remedies or folk advice "
+            "unless they appear above.\n"
         )
     else:
         ctx = (
-            "REFERENCE MATERIAL: None retrieved for this query.\n"
+            "\n\nNo retrieved reference material. "
             "Answer from established clinical dental knowledge (standard protocols only). "
-            "Do NOT include home remedies or folk advice.\n\n"
+            "Do NOT include home remedies or folk advice.\n"
         )
 
-    # ── Block 4: Format rules ─────────────────────────────────────────────────
-    # Arabic and English format blocks are parallel in structure and specificity.
-    # Both enforce the same standards — no quality gap between languages.
+    # ── Format — language-aware ───────────────────────────────────────────────
     if ar:
         if qtype == "instruction":
             fmt = (
-                "FORMAT:\n"
-                "• استخدم الرمز • فقط لكل نقطة — ممنوع الأرقام، ممنوع الشرطات.\n"
-                "• كل نقطة: جملة واحدة كاملة وقابلة للتطبيق — محددة وسريرية، لا عامة ولا مبهمة.\n"
-                "• عدد النقاط: من 4 إلى 6 فقط — لا أقل ولا أكثر.\n"
-                "• ممنوع: عنوان للقائمة، جملة تمهيدية، جملة ختامية — "
-                "ابدأ مباشرةً بأول نقطة بدون أي مقدمة.\n\n"
+                "FORMAT: استخدم الرمز • فقط لكل نقطة — جملة واحدة واضحة وقابلة للتطبيق لكل نقطة.\n"
+                "LENGTH: من 4 إلى 6 نقاط كحد أقصى.\n"
             )
         elif qtype == "symptom":
             fmt = (
-                "FORMAT:\n"
-                "• نثر مباشر فقط — ممنوع تماماً استخدام النقاط أو القوائم.\n"
-                "• من 3 إلى 5 جمل. كل جملة تحمل معلومة سريرية حقيقية ومفيدة — "
-                "لا حشو ولا تكرار.\n"
-                "• اشرح السبب المحتمل وآلية حدوثه — لا تكتفِ بوصف ما قاله المريض.\n"
-                "• اختم بجملة واحدة توصي بمراجعة طبيب الأسنان.\n\n"
+                "FORMAT: نثر مباشر فقط — بدون نقاط أو قوائم.\n"
+                "LENGTH: من 3 إلى 4 جمل فقط.\n"
+                "اختم بجملة واحدة قصيرة تنصح فيها بمراجعة طبيب الأسنان.\n"
             )
         else:
             fmt = (
-                "FORMAT:\n"
-                "• نثر مباشر فقط — ممنوع تماماً استخدام النقاط أو القوائم.\n"
-                "• من 2 إلى 4 جمل، كل جملة دقيقة ومفيدة وتحمل معلومة حقيقية.\n"
-                "• لا مقدمات عامة، لا تكرار للسؤال — اذهب مباشرةً للإجابة.\n\n"
+                "FORMAT: نثر مباشر فقط — بدون نقاط أو قوائم.\n"
+                "LENGTH: من 2 إلى 3 جمل فقط.\n"
             )
     else:
         if qtype == "instruction":
             fmt = (
-                "FORMAT:\n"
-                "• Use the • character only for each bullet. No numbers, no dashes.\n"
-                "• Each bullet: one complete, actionable sentence — specific and clinical, "
-                "not vague or generic.\n"
-                "• Total bullets: 4 to 6. No fewer, no more.\n"
-                "• No list heading, no introductory sentence, no closing sentence — "
-                "begin directly with the first bullet, nothing before it.\n\n"
+                "FORMAT: Use the • character for each bullet — "
+                "one clear, actionable sentence per bullet.\n"
+                "LENGTH: 4 to 6 bullets maximum.\n"
             )
         elif qtype == "symptom":
             fmt = (
-                "FORMAT:\n"
-                "• Plain prose only — no bullet points, no lists whatsoever.\n"
-                "• 3 to 5 sentences. Each sentence must carry a distinct, useful clinical point — "
-                "no padding, no repetition.\n"
-                "• Explain the likely cause and the mechanism behind it — "
-                "not just a restatement of the symptom.\n"
-                "• End with one sentence recommending a dental consultation.\n\n"
+                "FORMAT: Plain prose only — no bullet points, no lists.\n"
+                "LENGTH: 3 to 4 sentences maximum.\n"
+                "End with one brief sentence recommending a dental consultation.\n"
             )
         else:
             fmt = (
-                "FORMAT:\n"
-                "• Plain prose only — no bullet points, no lists.\n"
-                "• 2 to 4 sentences, each precise and informative.\n"
-                "• No generic preamble, no question restatement — "
-                "go directly to the answer.\n\n"
+                "FORMAT: Plain prose only — no bullet points, no lists.\n"
+                "LENGTH: 2 to 3 sentences maximum.\n"
             )
 
-    # ── Block 5: Core rules ────────────────────────────────────────────────────
-    core = (
-        "CORE RULES:\n"
-        "• Explain likely causes and the clinical mechanism behind them — not just surface facts.\n"
-        "• You may explain: causes, clinical meaning, how conditions develop, "
-        "what treatment generally involves, what a dental visit typically looks like.\n"
-        "• You may NOT: prescribe for a specific patient, write a personalised treatment plan, "
-        "or commit to a definitive diagnosis as certain.\n"
-        "• Use 'typically', 'often', 'in most cases' for uncertain claims.\n"
-        "• Do NOT claim insufficient information when standard clinical knowledge applies.\n"
-        "• Do NOT ask the user any follow-up questions.\n"
-        "• Do NOT open your response with filler phrases: 'Certainly!', 'Of course!', "
-        "'Sure!', 'Great question!', 'بالتأكيد!', 'حسناً!', 'بكل سرور!' — "
-        "start directly with the content.\n"
-        "• Do NOT restate or paraphrase the user's question at the start of your answer.\n\n"
-    )
-
-    # ── Block 6: Scope ─────────────────────────────────────────────────────────
     scope = (
         "SCOPE: You are a dental health assistant only. "
         "If the question is clearly unrelated to oral or dental health, respond with exactly: "
         "'This is outside the scope of this oral health application.' (English) "
-        "or 'هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان.' (Arabic). Nothing more.\n\n"
+        "or 'هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان.' (Arabic). Nothing more.\n"
     )
 
-    # ── Block 7: Focus ─────────────────────────────────────────────────────────
     focus = (
         "FOCUS: Answer only what was asked — nothing more. "
         "Do not proactively mention x-rays, follow-up appointments, or additional procedures "
-        "unless the user explicitly asked about them.\n\n"
+        "unless the user explicitly asked about them. "
+        "A short specific question should get a short specific answer.\n"
     )
 
-    # ── Block 8: Alarmism ─────────────────────────────────────────────────────
     alarmism = (
-        "ALARMISM: Do not add 'if symptoms worsen, see a dentist' or similar escalation warnings "
-        "unless the user explicitly describes uncontrolled bleeding, fever combined with dental pain, "
-        "or difficulty breathing or swallowing. Omit all escalation language for other questions.\n\n"
+        "ALARMISM: Do not add 'if symptoms worsen, see a dentist' or similar warnings "
+        "unless the user explicitly describes uncontrolled bleeding, fever with dental pain, "
+        "or difficulty breathing or swallowing. Omit escalation language for all other questions.\n"
     )
 
-    # ── Block 9: Differential ─────────────────────────────────────────────────
     differential = (
-        "DIFFERENTIAL: When symptoms are vague or could have multiple causes, briefly name the "
-        "2–3 most likely possibilities before elaborating. Never commit to a single diagnosis "
-        "from a vague description. Use language like 'this is often caused by...', "
-        "'common causes include...'.\n\n"
+        "DIFFERENTIAL: When symptoms are vague or could have multiple causes, briefly name "
+        "the 2–3 most likely possibilities before elaborating. "
+        "Never commit to a single diagnosis from a vague description. "
+        "Use language like 'this is often caused by...', 'common causes include...'.\n"
     )
 
-    # ── Block 10: Medication ──────────────────────────────────────────────────
     medication = (
-        "MEDICATION: You may freely discuss antibiotics commonly used in dentistry, "
+        "MEDICATION: You may freely discuss: antibiotics commonly used in dentistry, "
         "alternatives for penicillin allergy, general safe OTC dosage ranges for ibuprofen "
         "and paracetamol, medication side effects, IV vs oral antibiotic use, and "
         "weight-based dosage estimation for reference. "
-        "Do NOT prescribe for a specific patient or write a personalised treatment plan.\n\n"
+        "Do NOT prescribe for a specific patient or write a personalised treatment plan.\n"
     )
 
-    # ── Block 11: Language and terminology ────────────────────────────────────
-    # Arabic: comprehensive term map + tone. English: tone only.
     if ar:
         lang = (
-            "TERMINOLOGY — use these exact Arabic terms. No substitutions, no English alternatives:\n"
-            "قطعة شاش = gauze  |  حشوة = filling  |  علاج العصب = root canal  |  "
-            "تاج = crown  |  تنظيف الجير = scaling  |  تبييض = whitening  |  "
-            "خيط الأسنان = dental floss  |  زرعة = implant  |  خلع = extraction  |  "
-            "ضرس العقل = wisdom tooth  |  لثة = gum  |  تسوس = decay or cavity  |  "
-            "البلاك = plaque  |  جير الأسنان = tartar or calculus  |  "
-            "تقليح = root planing or deep cleaning  |  "
-            "طقم أسنان = denture  |  جسر = dental bridge  |  قشرة = veneer  |  "
-            "تخدير أو بنج = anaesthesia  |  خراج = abscess  |  لب السن = dental pulp  |  "
-            "مينا الأسنان = enamel  |  انحسار اللثة = gum recession\n\n"
-            "TONE: Natural Gulf Arabic. A knowledgeable, warm dental professional speaking "
-            "directly to a patient — clear and calm, not academic, not colloquial slang.\n\n"
+            "LANGUAGE AND TONE:\n"
+            "Write in natural Gulf Arabic. "
+            "The tone should feel like a knowledgeable dentist speaking directly and warmly "
+            "to a patient — calm, clear, professional, human. Not academic. Not slang.\n"
+            "\n"
+            "Key principles:\n"
+            "• Use the most natural, commonly heard Arabic equivalent for every term. "
+            "Ask yourself: what would a patient naturally say at a Gulf dental clinic? Use that.\n"
+            "• Do not insert English mid-sentence by default. "
+            "If a term is widely known by its English name at clinics (e.g. X-ray), "
+            "write the Arabic first, then English in parentheses on first mention only.\n"
+            "• Never translate word-for-word from English. "
+            "Use the phrase a native Arabic speaker would actually say.\n"
+            "• Gulf connectors — بس، لما، يصير، فيه، تقدر، فعلاً — "
+            "are appropriate when they fit naturally. Do not force them.\n"
+            "• Standard natural terms to use exactly as shown: "
+            "قطعة شاش (gauze), حشوة (filling), علاج العصب (root canal), "
+            "تاج (crown), تنظيف الجير (scaling), تبييض (whitening), "
+            "خيط الأسنان (floss), زرعة (implant), خلع (extraction), "
+            "ضرس العقل (wisdom tooth).\n"
         )
     else:
         lang = (
-            "TONE: Plain, clear English for a non-dental adult. "
-            "Warm and knowledgeable — like a trusted professional who explains clearly "
-            "without being clinical or distant. Define technical terms briefly on first use.\n\n"
+            "LANGUAGE AND TONE: Plain, clear English for a non-dental adult. "
+            "Calm, professional, and warm — like a knowledgeable friend who explains things "
+            "clearly without being clinical or academic. "
+            "Briefly define technical terms the first time you use them.\n"
         )
 
-    # ── Block 12: Forbidden patterns ──────────────────────────────────────────
-    forbidden = (
-        "STRICTLY FORBIDDEN — violating any of these is a hard failure:\n"
-        "• Numbered or lettered lists (1. 2. 3. / a. b. c.)\n"
-        "• Markdown headings (# ## ###) or bold text used as section titles\n"
-        "• Hyphens as bullet markers (- item) — the only permitted bullet character is •\n"
-        "• Summary or conclusion phrases: 'In summary', 'To summarize', 'Overall', "
-        "'In conclusion', 'خلاصة', 'خلاصة القول', 'ختاماً', 'باختصار', 'في الختام'\n"
-        "• Filler openers: 'Certainly!', 'Of course!', 'Great!', 'Sure!', "
-        "'بالتأكيد', 'بكل سرور', 'حسناً', 'بالطبع'\n"
-        "• Restating or paraphrasing the user's question in any form\n"
-        "• Any text appended after the final content sentence\n"
-        "Your response ends at the last relevant sentence. Nothing follows it.\n\n"
-    )
-
-    # ── Assemble system prompt ─────────────────────────────────────────────────
-    # Order is deliberate:
-    # 1. Language enforcement  — must be first for Arabic (highest attention weight)
-    # 2. Identity              — establishes role
-    # 3. Core rules            — primary behavioural constraints
-    # 4. Scope / focus         — boundary rules
-    # 5. Format                — output structure
-    # 6. Supporting rules      — alarmism, differential, medication
-    # 7. Language / tone       — style and terminology
-    # 8. Forbidden             — hard prohibitions
-    # 9. Continuity            — conversation context (if applicable)
-    # 10. RAG context          — retrieved material last = highest recency weight
     system = (
-        lang_enforce
-        + "You are ORA, a dental health assistant for general patients.\n"
-          "Provide accurate, specific, clinically grounded dental information.\n\n"
-        + core
+        "You are ORA, a dental health assistant for general patients.\n"
+        "Give accurate, specific, genuinely useful dental information.\n"
+        "\n"
+        "CORE RULES:\n"
+        "• Explain likely causes and the mechanism behind them.\n"
+        "• You may explain: causes, clinical meaning, how conditions develop, "
+        "what treatment generally involves, what a dental visit typically looks like.\n"
+        "• You may NOT: prescribe for a specific patient, write a personalised treatment plan, "
+        "state a definitive diagnosis as certain.\n"
+        "• Use 'typically', 'often', 'in most cases' for uncertain claims.\n"
+        "• Do NOT claim insufficient information when standard clinical knowledge exists.\n"
+        "• Do NOT ask the user any follow-up questions.\n"
+        "• Use conversation history to understand the context of the current message.\n"
+        "\n"
         + scope
         + focus
         + fmt
@@ -858,8 +780,7 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
         + differential
         + medication
         + lang
-        + forbidden
-        + continuity
+        + _FORBIDDEN
         + ctx
     )
 
@@ -872,6 +793,12 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
                 msgs.append({"role": role, "content": content})
     msgs.append({"role": "user", "content": q})
 
+    # ── BUG FIX: Use chat.completions.create for gpt-4o ──────────────────────
+    # The previous revision used client.responses.create with reasoning={} and
+    # input=msgs — that is the Responses API syntax for o-series models only.
+    # For gpt-4o the correct call is client.chat.completions.create with messages=.
+    # Using the wrong method raised an exception on every call, causing the
+    # "Sorry, an error occurred" fallback to fire for every single query.
     try:
         r = client.chat.completions.create(
             model=MODEL,
@@ -900,7 +827,7 @@ if __name__ == "__main__":
     elif is_social_exchange(q):
         print(social_response(q))
     else:
-        qv                    = embed(q)
+        qv               = embed(q)
         match, score, ar, idx = dataset_match(q, qv)
         if match and score >= SIM_THRESHOLD:
             print(match["ar_a"] if ar else match["en_a"])
