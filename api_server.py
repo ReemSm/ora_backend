@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
-import rag_engine as rag
+import step3_dataset_gpt_with_contract_and_strict_rag.py as rag
 
 
 # ─────────────────────────────────────────────────────────────
