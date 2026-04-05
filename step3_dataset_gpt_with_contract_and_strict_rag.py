@@ -17,14 +17,23 @@ MODEL = "gpt-4o"
 EMBED_MODEL = "text-embedding-3-large"
 PINECONE_INDEX = "oraapp777"
 
-SIM_THRESHOLD = 0.70
-MIN_RELEVANCE = 0.28
-MIN_AUTHORITY = 0.40
-TOP_K_RAW = 6
-TOP_K_FINAL = 3
-MAX_GPT_TOKENS = 420
+# Retrieval / grounding
+TOP_K_RAW = 12
+TOP_K_FINAL = 5
+MIN_RELEVANCE = 0.38
+MIN_AUTHORITY = 0.25
 MIN_REF_DISPLAY = 0.70
-SEMANTIC_DENTAL_THRESHOLD = 0.55
+SIM_THRESHOLD = 0.84
+SEMANTIC_DENTAL_THRESHOLD = 0.56
+
+# Context sufficiency
+MIN_CONTEXT_TOTAL_CHARS = 220
+MIN_CONTEXT_AVG_SCORE = 0.50
+MIN_CONTEXT_TOP_SCORE = 0.55
+
+# Generation
+MAX_GPT_TOKENS = 260
+TEMPERATURE = 0.0
 
 # Pinecone metadata field names
 PINECONE_CHUNK_FIELD = "chunk_text"
@@ -81,8 +90,8 @@ DATASET = [
         "en_a": (
             "Bluish discoloration near an implant is common when the surrounding gum tissue is "
             "naturally thin — the metallic components show through the tissue. This is usually an "
-            "anatomical variation rather than a sign of infection or implant failure. It is mainly "
-            "an aesthetic concern. A periodontist or implant specialist can assess whether soft tissue "
+            "anatomical variation rather than a sign of infection or implant failure. It is mainly an "
+            "aesthetic concern. A periodontist or implant specialist can assess whether soft tissue "
             "correction is appropriate."
         ),
         "ar_q": "بعد الزرعة صار عندي لون أزرق في اللثة",
@@ -256,7 +265,8 @@ def has_dental_signal(text: str) -> bool:
 def history_has_dental_context(history: list) -> bool:
     if not history:
         return False
-    for turn in history:
+    recent = history[-4:]
+    for turn in recent:
         content = turn.get("content", "")
         if has_dental_signal(content):
             return True
@@ -267,8 +277,7 @@ def refusal_treatment(q: str) -> str:
     return (
         "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. يُنصح بمراجعة طبيب أسنان مرخّص."
         if is_ar(q) else
-        "I can't prescribe medication or provide a personalised diagnosis. "
-        "Please consult a licensed dentist."
+        "I can't prescribe medication or provide a personalised diagnosis. Please consult a licensed dentist."
     )
 
 
@@ -280,10 +289,17 @@ def refusal_scope(q: str) -> str:
     )
 
 
+def insufficient_info(q: str) -> str:
+    return (
+        "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال."
+        if is_ar(q) else
+        "I don't have enough grounded information to answer this reliably."
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LIMITED SOCIAL HANDLER
 # Only for true standalone greetings / thanks / goodbye.
-# It does NOT catch yes/no/okay, so follow-up context is preserved.
 # ─────────────────────────────────────────────────────────────────────────────
 _SOCIAL_EN = [
     r"^(hi|hello|hey|good\s*(morning|afternoon|evening|day))[\s!.,?]*$",
@@ -335,7 +351,6 @@ def social_response(q: str) -> str:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUESTION TYPE
-# Bullets only for instructions / aftercare / post-op / what to avoid / what to do.
 # ─────────────────────────────────────────────────────────────────────────────
 def detect_question_type(q: str) -> str:
     ql = (q or "").lower().strip()
@@ -401,8 +416,7 @@ def _load_json_file(path: str):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        log.warning(f"Could not load cache file {path}: {e}")
+    except Exception:
         return None
 
 
@@ -524,8 +538,7 @@ def _extract_text(md: dict) -> str:
             text = str(val).strip()
             if text:
                 log.warning(
-                    f"_extract_text: primary field '{PINECONE_CHUNK_FIELD}' empty. "
-                    f"Used fallback field '{field}'."
+                    f"_extract_text: primary field '{PINECONE_CHUNK_FIELD}' empty. Used fallback field '{field}'."
                 )
                 return text
 
@@ -539,54 +552,75 @@ def _extract_text(md: dict) -> str:
             continue
         if isinstance(val, str) and len(val.strip()) > 40:
             text = val.strip()
-            log.warning(
-                f"_extract_text: using last-resort field '{key}' (length={len(text)})."
-            )
+            log.warning(f"_extract_text: using last-resort field '{key}' (length={len(text)}).")
             return text
 
-    log.error(
-        f"_extract_text: no usable text field found. "
-        f"Fields present: {list(md.keys())}"
-    )
+    log.error(f"_extract_text: no usable text field found. Fields present: {list(md.keys())}")
     return ""
+
+
+def assess_context_strength(accepted_chunks: list) -> dict:
+    if not accepted_chunks:
+        return {
+            "is_sufficient": False,
+            "top_score": 0.0,
+            "avg_score": 0.0,
+            "total_chars": 0,
+        }
+
+    top_score = max(c["score"] for c in accepted_chunks)
+    avg_score = sum(c["score"] for c in accepted_chunks) / len(accepted_chunks)
+    total_chars = sum(len(c["text"]) for c in accepted_chunks)
+
+    is_sufficient = (
+        top_score >= MIN_CONTEXT_TOP_SCORE
+        and avg_score >= MIN_CONTEXT_AVG_SCORE
+        and total_chars >= MIN_CONTEXT_TOTAL_CHARS
+    )
+
+    return {
+        "is_sufficient": is_sufficient,
+        "top_score": round(top_score, 4),
+        "avg_score": round(avg_score, 4),
+        "total_chars": total_chars,
+    }
 
 
 def rag_retrieve(qv: list):
     """
     Returns:
-      context_chunks, display_titles, is_off_topic, debug_info
+      context_chunks, display_titles, accepted_chunks, is_off_topic, debug_info
     """
     debug_info = {
         "pinecone_match_count": 0,
         "top_score": None,
         "chunks_injected": 0,
         "authority_filter_dropped": 0,
-        "fallback_used": False,
         "field_errors": 0,
+        "context_avg_score": 0.0,
+        "context_total_chars": 0,
+        "context_sufficient": False,
     }
 
     try:
         res = index.query(vector=qv, top_k=TOP_K_RAW, include_metadata=True)
         matches = res.get("matches", [])
-        for m in matches[:1]:
-            log.info(f"METADATA KEYS: {list((m.get('metadata') or {}).keys())}")
     except Exception as e:
         log.error(f"Pinecone query failed: {e}")
-        return [], [], False, debug_info
+        return [], [], [], False, debug_info
 
     debug_info["pinecone_match_count"] = len(matches)
 
     if not matches:
         log.info("RAG: 0 matches returned by Pinecone")
-        return [], [], False, debug_info
+        return [], [], [], False, debug_info
 
     top_score = float(matches[0].get("score", 0))
     debug_info["top_score"] = round(top_score, 4)
-    log.info(f"RAG: top_score={top_score:.4f} threshold={MIN_RELEVANCE}")
 
     if top_score < MIN_RELEVANCE:
         log.info("RAG: off-topic — top_score below MIN_RELEVANCE")
-        return [], [], True, debug_info
+        return [], [], [], True, debug_info
 
     accepted = []
 
@@ -602,9 +636,7 @@ def rag_retrieve(qv: list):
                     debug_info["authority_filter_dropped"] += 1
                     continue
             except (TypeError, ValueError):
-                log.warning(
-                    f"RAG: authority value {raw_auth!r} not parseable; accepted without authority check."
-                )
+                log.warning(f"RAG: authority value {raw_auth!r} not parseable; accepting chunk.")
 
         text = _extract_text(md)
         if not text:
@@ -619,63 +651,38 @@ def rag_retrieve(qv: list):
             }
         )
 
-    if not accepted and matches:
-        log.warning(
-            f"RAG fallback: all chunks dropped by authority filter "
-            f"(dropped={debug_info['authority_filter_dropped']}, "
-            f"field_errors={debug_info['field_errors']}). Re-running without authority filter."
-        )
-        debug_info["fallback_used"] = True
-        debug_info["field_errors"] = 0
-
-        for m in matches[:TOP_K_FINAL]:
-            md = m.get("metadata") or {}
-            text = _extract_text(md)
-            if not text:
-                debug_info["field_errors"] += 1
-                continue
-
-            accepted.append(
-                {
-                    "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
-                    "text": text,
-                    "score": float(m.get("score", 0)),
-                }
-            )
-
     if not accepted:
-        log.warning("RAG: no usable chunks after fallback.")
-        return [], [], False, debug_info
+        log.warning("RAG: no usable chunks after filtering.")
+        return [], [], [], False, debug_info
 
     seen = set()
     unique = []
     for chunk in accepted:
-        key = chunk["title"] if chunk["title"] else chunk["text"][:120]
+        key = chunk["title"].strip().lower() if chunk["title"] else chunk["text"][:180].strip().lower()
         if key not in seen:
             seen.add(key)
             unique.append(chunk)
 
-    context_chunks = [c["text"] for c in unique[:TOP_K_FINAL]]
+    final_chunks = unique[:TOP_K_FINAL]
+    context_chunks = [c["text"] for c in final_chunks]
     display_titles = [
         c["title"]
-        for c in unique
+        for c in final_chunks
         if c["title"] and c["score"] >= MIN_REF_DISPLAY
-    ][:TOP_K_FINAL]
+    ]
 
+    strength = assess_context_strength(final_chunks)
     debug_info["chunks_injected"] = len(context_chunks)
-    log.info(
-        f"RAG: injected={len(context_chunks)} "
-        f"authority_dropped={debug_info['authority_filter_dropped']} "
-        f"fallback={debug_info['fallback_used']} "
-        f"field_errors={debug_info['field_errors']}"
-    )
+    debug_info["context_avg_score"] = strength["avg_score"]
+    debug_info["context_total_chars"] = strength["total_chars"]
+    debug_info["context_sufficient"] = strength["is_sufficient"]
 
-    return context_chunks, display_titles, False, debug_info
+    return context_chunks, display_titles, final_chunks, False, debug_info
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATASET FALLBACK CONTEXT
-# Used only when RAG returns no context.
+# Used only when RAG returns no sufficient context.
 # ─────────────────────────────────────────────────────────────────────────────
 def build_dataset_fallback_context(q: str, qv: list):
     match, score, ar, idx = dataset_match(q, qv)
@@ -683,12 +690,13 @@ def build_dataset_fallback_context(q: str, qv: list):
         text = match["ar_a"] if ar else match["en_a"]
         title = f"dataset_fallback_{idx}"
         log.info(f"Dataset fallback used: idx={idx}, score={score:.4f}")
-        return [text], [title]
-    return [], []
+        return [text], [title], score
+    return [], [], score if match is not None else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GPT GENERATION
+# Strict grounded generation only.
 # ─────────────────────────────────────────────────────────────────────────────
 _FORBIDDEN = (
     "STRICTLY FORBIDDEN:\n"
@@ -697,24 +705,29 @@ _FORBIDDEN = (
     "• Do not use bold section titles.\n"
     "• Do not add summary or conclusion phrases.\n"
     "• Do not end with offers like 'I can also tell you...' or 'let me know if...'.\n"
+    "• Do not mention sources, references, retrieval, documents, context, dataset, or grounding.\n"
     "• End at the last relevant sentence.\n"
 )
 
 
-def _build_context_block(context_chunks: list) -> str:
-    if context_chunks:
+def _build_context_block(context_chunks: list, ar: bool) -> str:
+    if ar:
         return (
-            "REFERENCE MATERIAL — this is your PRIMARY source. "
-            "Base the answer on it directly. "
-            "Only supplement from established clinical dental knowledge when the reference "
-            "material does not cover a necessary detail. Do not drift into generic filler.\n\n"
+            "REFERENCE MATERIAL:\n"
+            "أجب اعتماداً على النص التالي فقط.\n"
+            "ممنوع إضافة معلومات غير موجودة فيه.\n"
+            "إذا لم يكن النص كافياً للإجابة، اكتب هذه الجملة فقط حرفياً:\n"
+            "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال.\n\n"
             + "\n---\n".join(context_chunks)
         )
 
     return (
-        "No retrieved reference material is available. "
-        "Use established clinical dental knowledge only. "
-        "Stay concise, specific, and clinically useful."
+        "REFERENCE MATERIAL:\n"
+        "Answer using only the text below.\n"
+        "Do not add facts that are not supported by it.\n"
+        "If the text is not enough to answer, output exactly this sentence:\n"
+        "I don't have enough grounded information to answer this reliably.\n\n"
+        + "\n---\n".join(context_chunks)
     )
 
 
@@ -724,31 +737,27 @@ def _build_format_rules(ar: bool, qtype: str) -> str:
             return (
                 "FORMAT:\n"
                 "• استخدم الرمز • فقط لكل نقطة.\n"
-                "• من 4 إلى 6 نقاط كحد أقصى.\n"
-                "• كل نقطة تكون جملة واحدة واضحة، عملية، ومباشرة.\n"
-                "• هذا ينطبق على التعليمات، العناية بعد الإجراء، وما يجب تجنبه.\n"
+                "• من 3 إلى 5 نقاط كحد أقصى.\n"
+                "• كل نقطة تكون جملة واحدة واضحة ومباشرة.\n"
             )
         return (
             "FORMAT:\n"
             "• نثر مباشر فقط، بدون نقاط أو قوائم.\n"
-            "• من 2 إلى 4 جمل كحد أقصى.\n"
-            "• الجواب يكون مختصراً لكن مكتمل الفائدة.\n"
+            "• من 2 إلى 3 جمل كحد أقصى.\n"
         )
 
     if qtype == "instruction":
         return (
             "FORMAT:\n"
             "• Use the • symbol only.\n"
-            "• 4 to 6 bullet points maximum.\n"
+            "• 3 to 5 bullet points maximum.\n"
             "• Each bullet must be one clear, actionable sentence.\n"
-            "• Apply this to instructions, aftercare, post-operative guidance, and avoidance advice.\n"
         )
 
     return (
         "FORMAT:\n"
         "• Use plain prose only, with no bullet points.\n"
-        "• 2 to 4 sentences maximum.\n"
-        "• Keep the answer brief but complete and useful.\n"
+        "• 2 to 3 sentences maximum.\n"
     )
 
 
@@ -757,89 +766,60 @@ def _build_language_tone_rules(ar: bool) -> str:
         return (
             "LANGUAGE AND TONE:\n"
             "• اكتب بالعربية فقط، بدون خلط مع الإنجليزية.\n"
-            "• استخدم عربية طبيعية نظيفة، حيادية، مهنية، وإنسانية.\n"
-            "• لا تجعل الأسلوب فصحى ثقيلة مثل الكتب أو الصحف، ولا عامية مبتذلة.\n"
-            "• استخدم المصطلحات العربية الطبيعية التي يسمعها المريض في العيادة.\n"
-            "• استخدم هذه الصياغات عند الحاجة بالضبط: قطعة شاش، حشوة، علاج العصب، تاج، تنظيف الجير، تبييض، خيط الأسنان، زرعة، خلع، ضرس العقل.\n"
-            "• لا تكتب كلمة gauze داخل الجواب العربي. استخدم قطعة شاش فقط.\n"
+            "• استخدم عربية طبيعية نظيفة، حيادية، ومهنية.\n"
+            "• لا تستخدم أسلوباً أكاديمياً ثقيلاً.\n"
         )
 
     return (
         "LANGUAGE AND TONE:\n"
         "• Write in English only.\n"
         "• Use plain, clear, professional English.\n"
-        "• Sound calm, informed, and human.\n"
         "• Avoid academic or textbook phrasing.\n"
-        "• Briefly define technical terms only when needed.\n"
     )
 
 
-def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
+def grounded_answer(q: str, context_chunks: list, history=None) -> str:
     ar = is_ar(q)
     qtype = detect_question_type(q)
 
-    context_block = _build_context_block(context_chunks or [])
-    format_rules = _build_format_rules(ar, qtype)
-    language_rules = _build_language_tone_rules(ar)
-
     role_layer = (
         "You are ORA, a dental health assistant for general patients.\n"
-        "Give concise, clinically useful, patient-friendly dental answers.\n"
-    )
-
-    scope_layer = (
-        "SCOPE:\n"
-        "• You are a dental health assistant only.\n"
-        "• If the question is clearly unrelated to oral or dental health, reply with exactly one sentence:\n"
-        "  - English: This is outside the scope of this oral health application.\n"
-        "  - Arabic: هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان.\n"
+        "Your job is to produce a concise patient-facing answer that stays strictly within the provided reference material.\n"
     )
 
     behavior_layer = (
         "CORE BEHAVIOR:\n"
-        "• Use conversation history to understand the user's current message.\n"
-        "• Treat the current message as part of an ongoing conversation when history exists.\n"
-        "• Do NOT ask the user follow-up questions.\n"
-        "• Do NOT offer extra help unprompted.\n"
-        "• Answer only the user's current need, but make the answer clinically useful and complete enough to stand on its own.\n"
-        "• For symptom questions, briefly explain the most likely cause or causes when clinically appropriate.\n"
-        "• For vague symptom descriptions, do not pretend certainty; use wording like 'often', 'commonly', or 'in many cases'.\n"
-        "• Do NOT prescribe for a specific patient.\n"
-        "• Do NOT write a personalised treatment plan.\n"
-        "• Do NOT use filler, repetition, or generic reassurance.\n"
-        "• Keep the tone consistently professional.\n"
-    )
-
-    medication_layer = (
-        "MEDICATION:\n"
-        "• You may discuss general medication classes, common dental use, common OTC pain-relief guidance, and common side effects in general terms.\n"
-        "• Do not prescribe a specific drug regimen for the user's personal case.\n"
+        "• Use the current message plus recent conversation only to understand what the user is asking.\n"
+        "• Do not use outside knowledge when reference material is present.\n"
+        "• Do not infer missing clinical details.\n"
+        "• Do not guess.\n"
+        "• Do not prescribe for a specific patient.\n"
+        "• Do not write a personalised treatment plan.\n"
+        "• Do not ask follow-up questions.\n"
+        "• Do not add filler or extra reassurance.\n"
     )
 
     escalation_layer = (
         "ESCALATION:\n"
-        "• Recommend urgent dental assessment only when the user describes red-flag symptoms such as facial swelling, spreading swelling, fever with dental pain, difficulty swallowing, or difficulty breathing.\n"
-        "• Otherwise, do not add unnecessary alarmist warnings.\n"
+        "• Mention urgent assessment only if the reference material itself supports that level of concern.\n"
     )
 
     system = "\n".join(
         [
             role_layer,
-            scope_layer,
             behavior_layer,
-            medication_layer,
             escalation_layer,
-            format_rules,
-            language_rules,
+            _build_format_rules(ar, qtype),
+            _build_language_tone_rules(ar),
             _FORBIDDEN,
-            context_block,
+            _build_context_block(context_chunks, ar),
         ]
     )
 
     msgs = [{"role": "system", "content": system}]
 
     if history:
-        for turn in history[-8:]:
+        for turn in history[-6:]:
             role = turn.get("role", "")
             content = turn.get("content", "")
             if role in ("user", "assistant") and content:
@@ -852,28 +832,26 @@ def gpt_style_answer(q: str, context_chunks=None, history=None) -> str:
             model=MODEL,
             messages=msgs,
             max_tokens=MAX_GPT_TOKENS,
-            temperature=0.2,
+            temperature=TEMPERATURE,
         )
-        return r.choices[0].message.content.strip()
+        text = (r.choices[0].message.content or "").strip()
+        return text or insufficient_info(q)
     except Exception as e:
         log.error(f"GPT error: {e}")
-        return (
-            "عذرًا، حدث خطأ. يُنصح بمراجعة طبيب أسنان مرخّص."
-            if ar else
-            "Sorry, an error occurred. Please consult a licensed dentist."
-        )
+        return insufficient_info(q)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN PIPELINE
-# Clean flow:
+# Strict flow:
 #   1) safety / scope
-#   2) social (true standalone only)
+#   2) social
 #   3) embed
 #   4) semantic scope gate
 #   5) RAG
-#   6) dataset fallback only if RAG has no context
-#   7) GPT
+#   6) dataset fallback only if RAG is insufficient
+#   7) grounded generation only
+#   8) fail closed when insufficient
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_answer(q: str, history=None):
     if is_treatment_request(q):
@@ -915,7 +893,7 @@ def generate_answer(q: str, history=None):
             },
         }
 
-    context_chunks, refs, off_topic, debug = rag_retrieve(qv)
+    context_chunks, refs, accepted_chunks, off_topic, debug = rag_retrieve(qv)
     debug["dental_score"] = round(dental_score, 4)
     debug["non_dental_score"] = round(non_dental_score, 4)
 
@@ -933,23 +911,34 @@ def generate_answer(q: str, history=None):
             "debug": debug,
         }
 
-    source = "rag"
+    # RAG mode: answer only when context is sufficient
+    if debug.get("context_sufficient"):
+        answer = grounded_answer(q, context_chunks=context_chunks, history=history)
+        return {
+            "answer": answer,
+            "refs": refs,
+            "source": "rag",
+            "debug": debug,
+        }
 
-    if not context_chunks:
-        dataset_ctx, dataset_refs = build_dataset_fallback_context(q, qv)
-        if dataset_ctx:
-            context_chunks = dataset_ctx
-            refs = dataset_refs
-            source = "dataset_fallback"
-        else:
-            source = "gpt_no_context"
+    # Controlled dataset fallback: only when highly similar
+    dataset_ctx, dataset_refs, dataset_score = build_dataset_fallback_context(q, qv)
+    debug["dataset_score"] = round(dataset_score, 4)
 
-    answer = gpt_style_answer(q, context_chunks=context_chunks, history=history)
+    if dataset_ctx:
+        answer = grounded_answer(q, context_chunks=dataset_ctx, history=history)
+        return {
+            "answer": answer,
+            "refs": dataset_refs,
+            "source": "dataset_fallback",
+            "debug": debug,
+        }
 
+    # Fail closed: no free-form GPT answer
     return {
-        "answer": answer,
-        "refs": refs,
-        "source": source,
+        "answer": insufficient_info(q),
+        "refs": [],
+        "source": "insufficient_grounded_context",
         "debug": debug,
     }
 
