@@ -29,7 +29,7 @@ class HistoryTurn(BaseModel):
 
 class AskRequest(BaseModel):
     query: str
-    history: Optional[List[HistoryTurn]] = []
+    history: Optional[List[HistoryTurn]] = None  # ✅ fixed (was [])
 
 
 # ─────────────────────────────────────────────────────────────
