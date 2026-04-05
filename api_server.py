@@ -1,12 +1,15 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, validator
-from typing import List, Optional
+import asyncio
 import logging
 import time
-import asyncio
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-import step3_dataset_gpt_with_contract_and_strict_rag as rag
+from typing import List, Optional, Literal
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, field_validator
+
+import rag_engine as rag
 
 
 # ─────────────────────────────────────────────────────────────
@@ -15,7 +18,7 @@ import step3_dataset_gpt_with_contract_and_strict_rag as rag
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 12
+REQUEST_TIMEOUT_SECONDS = 15
 
 ALLOWED_ORIGINS = [
     "https://your-frontend-domain.com",
@@ -23,44 +26,37 @@ ALLOWED_ORIGINS = [
 
 executor = ThreadPoolExecutor(max_workers=10)
 
-
-# ─────────────────────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="[API %(levelname)s] %(message)s")
 log = logging.getLogger("api")
 
 
 # ─────────────────────────────────────────────────────────────
-# APP INIT
+# APP
 # ─────────────────────────────────────────────────────────────
-app = FastAPI()
+app = FastAPI(title="ORA Backend")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
 # ─────────────────────────────────────────────────────────────
-# REQUEST MODELS
+# MODELS
 # ─────────────────────────────────────────────────────────────
 class HistoryTurn(BaseModel):
-    role: str
+    role: Literal["user", "assistant"]
     content: str
 
-    @validator("role")
-    def validate_role(cls, v):
-        if v not in ("user", "assistant"):
-            raise ValueError("Invalid role")
-        return v
-
-    @validator("content")
-    def validate_content(cls, v):
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, v: str) -> str:
         v = (v or "").strip()
+        if not v:
+            raise ValueError("History content cannot be empty")
         if len(v) > MAX_HISTORY_CONTENT_LENGTH:
             raise ValueError("History content too long")
         return v
@@ -70,8 +66,9 @@ class AskRequest(BaseModel):
     query: str
     history: Optional[List[HistoryTurn]] = None
 
-    @validator("query")
-    def validate_query(cls, v):
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, v: str) -> str:
         v = (v or "").strip()
         if not v:
             raise ValueError("Empty query")
@@ -80,69 +77,85 @@ class AskRequest(BaseModel):
         return v
 
 
+class AskResponse(BaseModel):
+    answer: str
+    references: List[str]
+    source: str
+    request_id: str
+    latency_ms: float
+
+
 # ─────────────────────────────────────────────────────────────
-# UTIL
+# HELPERS
 # ─────────────────────────────────────────────────────────────
-def truncate_history(history: List[HistoryTurn]):
+def normalize_history(history: List[HistoryTurn] | None) -> List[dict]:
     if not history:
         return []
-
     trimmed = history[-MAX_HISTORY_TURNS:]
-    return [{"role": h.role, "content": h.content.strip()} for h in trimmed]
+    return [{"role": item.role, "content": item.content.strip()} for item in trimmed]
 
 
-async def run_with_timeout(q, history):
-    loop = asyncio.get_event_loop()
+async def run_generate_answer(query: str, history: List[dict]) -> dict:
+    loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
-        loop.run_in_executor(executor, rag.generate_answer, q, history),
+        loop.run_in_executor(executor, rag.generate_answer, query, history),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
 
 # ─────────────────────────────────────────────────────────────
-# MAIN ENDPOINT
+# ENDPOINTS
 # ─────────────────────────────────────────────────────────────
-@app.post("/ask")
+@app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
-    start_time = time.time()
+    request_id = str(uuid.uuid4())
+    started = time.perf_counter()
 
     try:
-        q = req.query.strip()
-        history = truncate_history(req.history or [])
+        query = req.query.strip()
+        history = normalize_history(req.history)
 
-        log.info(f"Incoming query: {q[:120]}")
+        log.info(f"[{request_id}] /ask query={query[:120]!r} history_turns={len(history)}")
 
-        result = await run_with_timeout(q, history)
+        result = await run_generate_answer(query, history)
 
-        latency = round((time.time() - start_time) * 1000, 2)
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
 
-        return {
-            "answer": result.get("answer", ""),
-            "references": result.get("refs", []),
-            "source": result.get("source", "unknown"),
-            "latency_ms": latency,
-        }
+        log.info(
+            f"[{request_id}] completed source={result.get('source', 'unknown')} latency_ms={latency_ms}"
+        )
+
+        return AskResponse(
+            answer=result.get("answer", ""),
+            references=result.get("refs", []),
+            source=result.get("source", "unknown"),
+            request_id=request_id,
+            latency_ms=latency_ms,
+        )
 
     except asyncio.TimeoutError:
-        log.error("Request timed out")
-        return {
-            "answer": "Request timed out.",
-            "references": [],
-            "source": "timeout",
-        }
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        log.error(f"[{request_id}] timeout latency_ms={latency_ms}")
+        return AskResponse(
+            answer="Request timed out.",
+            references=[],
+            source="timeout",
+            request_id=request_id,
+            latency_ms=latency_ms,
+        )
 
-    except Exception as e:
-        log.exception("Server error")
-        return {
-            "answer": "Server error.",
-            "references": [],
-            "source": "server_error",
-        }
+    except Exception:
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        log.exception(f"[{request_id}] server_error latency_ms={latency_ms}")
+        return AskResponse(
+            answer="Server error.",
+            references=[],
+            source="server_error",
+            request_id=request_id,
+            latency_ms=latency_ms,
+        )
 
 
-# ─────────────────────────────────────────────────────────────
-# HEALTH CHECK
-# ─────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok", "service": "ORA backend"}
