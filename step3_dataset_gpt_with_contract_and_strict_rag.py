@@ -1,8 +1,7 @@
 import os
 import re
-import math
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from openai import OpenAI
 from pinecone import Pinecone
@@ -10,10 +9,6 @@ from pinecone import Pinecone
 logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s")
 log = logging.getLogger("ora")
 
-
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
 MODEL = "gpt-4o"
 EMBED_MODEL = "text-embedding-3-large"
 PINECONE_INDEX = "oraapp777"
@@ -21,11 +16,9 @@ PINECONE_INDEX = "oraapp777"
 TOP_K_RAW = 12
 TOP_K_FINAL = 5
 
-MIN_RELEVANCE = 0.35
-MIN_AUTHORITY = 0.20
-MIN_CONTEXT_TOP_SCORE = 0.52
-MIN_CONTEXT_AVG_SCORE = 0.46
-MIN_CONTEXT_TOTAL_CHARS = 220
+MIN_TOP_SCORE = 0.52
+MIN_AVG_SCORE = 0.46
+MIN_TOTAL_CHARS = 220
 
 MAX_REWRITE_TOKENS = 80
 MAX_ANSWER_TOKENS = 260
@@ -35,30 +28,15 @@ PINECONE_CHUNK_FIELD = "chunk_text"
 PINECONE_TITLE_FIELD = "title"
 PINECONE_AUTHORITY_FIELD = "authority_score"
 
-CHUNK_FALLBACK_FIELDS = ("text", "content", "chunk", "body", "passage", "page_content")
+CHUNK_FIELDS = ("chunk_text",)
+
+HISTORY_CHAR_BUDGET = 2200
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(PINECONE_INDEX)
 
-
-# ─────────────────────────────────────────────────────────────
-# LANGUAGE / SCOPE / SAFETY
-# ─────────────────────────────────────────────────────────────
-def is_ar(text: str) -> bool:
-    return bool(re.search(r"[\u0600-\u06FF]", text or ""))
-
-
-NON_DENTAL_BLOCK = [
-    "capital of", "weather forecast", "stock price", "bitcoin", "movie review",
-    "football score", "basketball game", "president of", "election results",
-    "flight booking", "hotel booking", "travel itinerary", "real estate investment",
-    "car review", "vehicle specs", "iphone review", "laptop specs",
-    "software development", "coding tutorial", "recipe for", "investment advice",
-    "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين", "أفضل فيلم",
-    "نتيجة مباراة", "رئيس الوزراء", "نتائج انتخابات", "حجز فندق", "تذكرة طيران",
-    "استثمار عقاري", "مواصفات سيارة", "برمجة تطبيقات", "وصفة طبخ",
-]
+ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
 
 DENTAL_SIGNALS = [
     "tooth", "teeth", "gum", "gums", "mouth", "oral", "dental", "dentist",
@@ -67,9 +45,22 @@ DENTAL_SIGNALS = [
     "extraction", "wisdom tooth", "molar", "veneer", "whitening", "floss",
     "gingivitis", "periodontitis", "pulpitis", "caries", "abscess",
     "pain", "ache", "bleeding", "swelling", "sensitivity", "numbness",
+    "toothache", "ulcer", "mouth sore", "bad breath", "retainer", "aligner",
     "سن", "أسنان", "ضرس", "لثة", "فم", "فك", "حشوة", "تاج", "زرعة",
     "علاج العصب", "تقويم", "تبييض", "خيط الأسنان", "التهاب اللثة", "تسوس",
-    "خلع", "خراج", "ألم", "نزيف", "تورم", "حساسية", "خدر",
+    "خلع", "خراج", "ألم", "نزيف", "تورم", "حساسية", "خدر", "رائحة الفم",
+    "قرحة", "تقويم شفاف", "مثبت",
+]
+
+NON_DENTAL_SIGNALS = [
+    "capital of", "weather forecast", "stock price", "bitcoin", "movie review",
+    "football score", "basketball game", "president of", "election results",
+    "flight booking", "hotel booking", "travel itinerary", "real estate investment",
+    "car review", "vehicle specs", "iphone review", "laptop specs",
+    "software development", "coding tutorial", "recipe for", "investment advice",
+    "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين", "أفضل فيلم",
+    "نتيجة مباراة", "رئيس الوزراء", "نتائج انتخابات", "حجز فندق", "تذكرة طيران",
+    "استثمار عقاري", "مواصفات سيارة", "برمجة تطبيقات", "وصفة طبخ",
 ]
 
 PRESCRIPTION_PATTERNS = [
@@ -99,21 +90,18 @@ SOCIAL_AR = [
 ]
 
 
+def is_ar(text: str) -> bool:
+    return bool(ARABIC_RE.search(text or ""))
+
+
+def has_any_signal(text: str, signals: List[str]) -> bool:
+    tl = (text or "").lower()
+    return any(sig.lower() in tl for sig in signals)
+
+
 def is_treatment_request(q: str) -> bool:
     ql = (q or "").lower()
     return any(re.search(p, ql) for p in PRESCRIPTION_PATTERNS)
-
-
-def has_dental_signal(text: str) -> bool:
-    tl = (text or "").lower()
-    return any(sig.lower() in tl for sig in DENTAL_SIGNALS)
-
-
-def is_out_of_scope(q: str) -> bool:
-    ql = (q or "").lower()
-    if has_dental_signal(ql):
-        return False
-    return any(term in ql for term in NON_DENTAL_BLOCK)
 
 
 def is_social_exchange(q: str) -> bool:
@@ -122,8 +110,8 @@ def is_social_exchange(q: str) -> bool:
     return any(re.search(p, ql, re.IGNORECASE) for p in SOCIAL_EN) or any(re.search(p, qa) for p in SOCIAL_AR)
 
 
-def social_response(q: str) -> str:
-    if is_ar(q):
+def social_response(ar: bool, q: str) -> str:
+    if ar:
         if re.search(r"شكر|ممنون|مشكور|يسلموا|يعطيك", q):
             return "على الرحب والسعة."
         if re.search(r"السلام\s*عليكم", q):
@@ -139,33 +127,29 @@ def social_response(q: str) -> str:
     return "Hello."
 
 
-def refusal_treatment(q: str) -> str:
-    return (
-        "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. يُنصح بمراجعة طبيب أسنان مرخّص."
-        if is_ar(q)
-        else "I can't prescribe medication or provide a personalised diagnosis. Please consult a licensed dentist."
-    )
+def refusal_treatment(ar: bool) -> str:
+    if ar:
+        return "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. يُنصح بمراجعة طبيب أسنان مرخّص."
+    return "I can't prescribe medication or provide a personalised diagnosis. Please consult a licensed dentist."
 
 
-def refusal_scope(q: str) -> str:
-    return (
-        "هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان."
-        if is_ar(q)
-        else "This is outside the scope of this oral health application."
-    )
+def refusal_scope(ar: bool) -> str:
+    if ar:
+        return "هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان."
+    return "This is outside the scope of this oral health application."
 
 
-def insufficient_info(q: str) -> str:
-    return (
-        "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال."
-        if is_ar(q)
-        else "I don't have enough grounded information to answer this reliably."
-    )
+def insufficient_info(ar: bool) -> str:
+    if ar:
+        return "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال."
+    return "I don't have enough grounded information to answer this reliably."
 
 
-# ─────────────────────────────────────────────────────────────
-# QUERY TYPE
-# ─────────────────────────────────────────────────────────────
+def looks_explicitly_non_dental(q: str) -> bool:
+    ql = (q or "").lower()
+    return has_any_signal(ql, NON_DENTAL_SIGNALS) and not has_any_signal(ql, DENTAL_SIGNALS)
+
+
 def detect_question_type(q: str) -> str:
     ql = (q or "").lower().strip()
 
@@ -184,48 +168,44 @@ def detect_question_type(q: str) -> str:
     return "informational"
 
 
-# ─────────────────────────────────────────────────────────────
-# EMBEDDING
-# ─────────────────────────────────────────────────────────────
 def embed(text: str) -> List[float]:
     return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
 
 
-def cosine(a: List[float], b: List[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
-# ─────────────────────────────────────────────────────────────
-# GPT REWRITE
-# ─────────────────────────────────────────────────────────────
-def rewrite_query_for_retrieval(q: str) -> str:
-    ar = is_ar(q)
-
-    system = (
-        "You rewrite patient dental questions into a short retrieval query for textbook-style dental sources.\n"
-        "Rules:\n"
-        "• Output one line only.\n"
-        "• Preserve the user's language.\n"
-        "• Expand into likely clinical dental search terms.\n"
-        "• Do not answer the question.\n"
-        "• Do not add formatting, bullets, explanations, or quotation marks.\n"
-        "• Keep it under 25 words.\n"
-    )
-
-    if ar:
-        system += (
-            "• استخدم مصطلحات سنية سريرية عربية مفهومة للبحث.\n"
-            "• أضف مرادفات سريرية محتملة عند الحاجة.\n"
-        )
-
+def translate_to_english(q: str) -> str:
     try:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": system},
+                {
+                    "role": "system",
+                    "content": "Translate the following Arabic dental query into clear, natural English for medical retrieval. Output only the translation.",
+                },
+                {"role": "user", "content": q},
+            ],
+            max_tokens=80,
+            temperature=0.0,
+        )
+        return (r.choices[0].message.content or "").strip() or q
+    except Exception as e:
+        log.error(f"Translation error: {e}")
+        return q
+
+
+def rewrite_query_for_retrieval(q: str) -> str:
+    try:
+        r = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Rewrite this into a short dental textbook retrieval query.\n"
+                        "One line only.\n"
+                        "No explanations.\n"
+                        "Under 25 words."
+                    ),
+                },
                 {"role": "user", "content": q},
             ],
             max_tokens=MAX_REWRITE_TOKENS,
@@ -238,185 +218,128 @@ def rewrite_query_for_retrieval(q: str) -> str:
         return q
 
 
-# ─────────────────────────────────────────────────────────────
-# RAG
-# ─────────────────────────────────────────────────────────────
 def extract_text(md: Dict[str, Any]) -> str:
-    primary = md.get(PINECONE_CHUNK_FIELD)
-    if primary:
-        text = str(primary).strip()
-        if text:
-            return text
-
-    for field in CHUNK_FALLBACK_FIELDS:
-        val = md.get(field)
-        if val:
-            text = str(val).strip()
-            if text:
-                return text
-
-    for _, val in md.items():
-        if isinstance(val, str) and len(val.strip()) > 40:
-            return val.strip()
-
-    return ""
+    val = md.get(PINECONE_CHUNK_FIELD)
+    return str(val).strip() if val else ""
 
 
-def retrieve_chunks(query_vector: List[float]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    debug = {
-        "match_count": 0,
-        "top_score": 0.0,
-        "avg_score": 0.0,
-        "total_chars": 0,
-        "context_sufficient": False,
-    }
-
+def normalize_authority_score(md: Dict[str, Any]) -> Optional[float]:
+    raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
+    if raw_auth is None:
+        return None
     try:
-        res = index.query(vector=query_vector, top_k=TOP_K_RAW, include_metadata=True)
-        matches = res.get("matches", [])
+        return float(raw_auth)
+    except:
+        log.warning(f"Invalid authority_score: {raw_auth}")
+        return 0.0
+
+
+def query_pinecone(vector: List[float]) -> List[Dict[str, Any]]:
+    try:
+        res = index.query(vector=vector, top_k=TOP_K_RAW, include_metadata=True)
+        return res.get("matches", [])
     except Exception as e:
-        log.error(f"Pinecone query failed: {e}")
-        return [], debug
+        log.error(f"Pinecone error: {e}")
+        return []
 
-    debug["match_count"] = len(matches)
-    if not matches:
-        return [], debug
 
-    debug["top_score"] = round(float(matches[0].get("score", 0.0)), 4)
-    if float(matches[0].get("score", 0.0)) < MIN_RELEVANCE:
-        return [], debug
+def merge_and_rank(matches_list: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    all_chunks = []
 
-    accepted: List[Dict[str, Any]] = []
-    for match in matches:
-        score = float(match.get("score", 0.0))
-        md = match.get("metadata") or {}
+    for matches in matches_list:
+        for m in matches:
+            md = m.get("metadata") or {}
+            text = extract_text(md)
+            if not text:
+                continue
 
-        raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
-        if raw_auth is not None:
-            try:
-                if float(raw_auth) < MIN_AUTHORITY:
-                    continue
-            except (TypeError, ValueError):
-                pass
+            authority = normalize_authority_score(md)
+            if authority is not None and authority < 0.20:
+                continue
 
-        text = extract_text(md)
-        if not text:
-            continue
-
-        accepted.append(
-            {
+            all_chunks.append({
                 "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
                 "text": text,
-                "score": score,
-            }
-        )
+                "score": float(m.get("score", 0.0)),
+            })
 
-    if not accepted:
-        return [], debug
+    all_chunks.sort(key=lambda x: x["score"], reverse=True)
 
-    unique: List[Dict[str, Any]] = []
     seen = set()
-    for chunk in accepted:
-        key = (chunk["title"] or chunk["text"][:180]).strip().lower()
+    unique = []
+    for c in all_chunks:
+        key = c["text"][:200]
         if key not in seen:
             seen.add(key)
-            unique.append(chunk)
+            unique.append(c)
+        if len(unique) >= TOP_K_FINAL:
+            break
 
-    final_chunks = unique[:TOP_K_FINAL]
+    return unique
 
-    avg_score = sum(c["score"] for c in final_chunks) / len(final_chunks)
-    total_chars = sum(len(c["text"]) for c in final_chunks)
 
-    debug["avg_score"] = round(avg_score, 4)
-    debug["total_chars"] = total_chars
-    debug["context_sufficient"] = (
-        debug["top_score"] >= MIN_CONTEXT_TOP_SCORE
-        and avg_score >= MIN_CONTEXT_AVG_SCORE
-        and total_chars >= MIN_CONTEXT_TOTAL_CHARS
+def retrieve_chunks(queries: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    debug = {"top_score": 0, "avg_score": 0, "total_chars": 0, "context_sufficient": False}
+
+    matches_list = []
+    for q in queries:
+        matches_list.append(query_pinecone(embed(q)))
+
+    chunks = merge_and_rank(matches_list)
+    if not chunks:
+        return [], debug
+
+    top = chunks[0]["score"]
+    avg = sum(c["score"] for c in chunks) / len(chunks)
+    total = sum(len(c["text"]) for c in chunks)
+
+    debug.update({
+        "top_score": top,
+        "avg_score": avg,
+        "total_chars": total,
+        "context_sufficient": top >= MIN_TOP_SCORE and (avg >= MIN_AVG_SCORE or total >= MIN_TOTAL_CHARS)
+    })
+
+    return chunks, debug
+
+
+def build_history_messages(history):
+    if not history:
+        return []
+
+    out = []
+    size = 0
+    for turn in reversed(history):
+        content = turn.get("content", "")
+        if size + len(content) > HISTORY_CHAR_BUDGET:
+            break
+        out.append(turn)
+        size += len(content)
+
+    return list(reversed(out))
+
+
+def answer_from_chunks(q, ar, chunks, history=None):
+    context = "\n\n".join(c["text"] for c in chunks)
+
+    system = (
+        "Answer clearly using only the reference.\n"
+        "Keep it natural and not academic.\n"
+        "If not enough info, say so.\n"
+        f"REFERENCE:\n{context}"
     )
-
-    return final_chunks, debug
-
-
-# ─────────────────────────────────────────────────────────────
-# GPT ANSWER FROM RAG ONLY
-# ─────────────────────────────────────────────────────────────
-def build_format_rules(ar: bool, qtype: str) -> str:
-    if ar:
-        if qtype == "instruction":
-            return (
-                "FORMAT:\n"
-                "• استخدم الرمز • فقط.\n"
-                "• من 3 إلى 5 نقاط كحد أقصى.\n"
-                "• كل نقطة جملة واحدة واضحة ومباشرة.\n"
-            )
-        return (
-            "FORMAT:\n"
-            "• نثر مباشر فقط، بدون نقاط.\n"
-            "• من 2 إلى 3 جمل كحد أقصى.\n"
-        )
-
-    if qtype == "instruction":
-        return (
-            "FORMAT:\n"
-            "• Use the • symbol only.\n"
-            "• 3 to 5 bullet points maximum.\n"
-            "• Each bullet must be one clear, actionable sentence.\n"
-        )
-
-    return (
-        "FORMAT:\n"
-        "• Use plain prose only, with no bullet points.\n"
-        "• 2 to 3 sentences maximum.\n"
-    )
-
-
-def answer_from_chunks(q: str, chunks: List[Dict[str, Any]], history: List[Dict[str, str]] | None = None) -> str:
-    ar = is_ar(q)
-    qtype = detect_question_type(q)
-
-    context_text = "\n---\n".join(chunk["text"] for chunk in chunks)
 
     if ar:
         system = (
-            "أنت مساعد صحة فم وأسنان للمرضى.\n"
-            "مهمتك شرح المعلومة بلغة بسيطة وإنسانية وغير أكاديمية.\n"
-            "استخدم النص المرجعي فقط.\n"
-            "ممنوع إضافة أي معلومة غير مدعومة من النص.\n"
-            "إذا كان النص غير كافٍ، اكتب فقط:\n"
-            "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال.\n"
-            "لا تذكر المصادر أو الكتب أو الاسترجاع.\n"
-            "لا تسأل أسئلة متابعة.\n"
-            "لا تكتب كأستاذ أو كتاب دراسي.\n"
-            f"{build_format_rules(ar, qtype)}\n"
-            "REFERENCE MATERIAL:\n"
-            f"{context_text}"
-        )
-    else:
-        system = (
-            "You are an oral health assistant for patients.\n"
-            "Your job is to explain in plain, calm, human language, not textbook language.\n"
-            "Use only the reference material below.\n"
-            "Do not add any fact not supported by it.\n"
-            "If the material is not enough, output only:\n"
-            "I don't have enough grounded information to answer this reliably.\n"
-            "Do not mention sources, retrieval, or documents.\n"
-            "Do not ask follow-up questions.\n"
-            "Do not sound like a professor or textbook.\n"
-            f"{build_format_rules(ar, qtype)}\n"
-            "REFERENCE MATERIAL:\n"
-            f"{context_text}"
+            "أنت مساعد صحة فم وأسنان.\n"
+            "اشرح ببساطة وبأسلوب طبيعي.\n"
+            "استخدم فقط النص.\n"
+            "إذا لم تكفِ المعلومات، قل ذلك.\n"
+            f"REFERENCE:\n{context}"
         )
 
     messages = [{"role": "system", "content": system}]
-
-    if history:
-        for turn in history[-4:]:
-            role = turn.get("role", "")
-            content = turn.get("content", "")
-            if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": content})
-
+    messages += build_history_messages(history)
     messages.append({"role": "user", "content": q})
 
     try:
@@ -426,52 +349,40 @@ def answer_from_chunks(q: str, chunks: List[Dict[str, Any]], history: List[Dict[
             max_tokens=MAX_ANSWER_TOKENS,
             temperature=TEMPERATURE,
         )
-        text = (r.choices[0].message.content or "").strip()
-        return text if text else insufficient_info(q)
-    except Exception as e:
-        log.error(f"Answer generation error: {e}")
-        return insufficient_info(q)
+        return (r.choices[0].message.content or "").strip()
+    except:
+        return insufficient_info(ar)
 
 
-# ─────────────────────────────────────────────────────────────
-# PUBLIC PIPELINE
-# ─────────────────────────────────────────────────────────────
-def generate_answer(q: str, history: List[Dict[str, str]] | None = None) -> Dict[str, Any]:
+def generate_answer(q: str, history=None):
     q = (q or "").strip()
+    ar = is_ar(q)
 
     if not q:
-        return {"answer": "Empty query.", "refs": [], "source": "error", "debug": {"error": "empty_query"}}
+        return {"answer": "Empty query.", "refs": [], "source": "error", "debug": {}}
 
     if is_treatment_request(q):
-        return {"answer": refusal_treatment(q), "refs": [], "source": "safety_refusal", "debug": {}}
+        return {"answer": refusal_treatment(ar), "refs": [], "source": "safety_refusal", "debug": {}}
 
     if is_social_exchange(q):
-        return {"answer": social_response(q), "refs": [], "source": "social", "debug": {}}
+        return {"answer": social_response(ar, q), "refs": [], "source": "social", "debug": {}}
 
-    if is_out_of_scope(q):
-        return {"answer": refusal_scope(q), "refs": [], "source": "scope_refusal", "debug": {}}
+    base_query = q
+    if ar:
+        base_query = translate_to_english(q)
 
-    rewritten_query = rewrite_query_for_retrieval(q)
-    query_vector = embed(rewritten_query)
-    chunks, debug = retrieve_chunks(query_vector)
+    rewritten = rewrite_query_for_retrieval(base_query)
 
-    debug["rewritten_query"] = rewritten_query
+    queries = [base_query]
+    if rewritten and rewritten != base_query:
+        queries.append(rewritten)
+
+    chunks, debug = retrieve_chunks(queries)
 
     if not chunks or not debug["context_sufficient"]:
-        return {
-            "answer": insufficient_info(q),
-            "refs": [],
-            "source": "insufficient_grounded_context",
-            "debug": debug,
-        }
+        return {"answer": insufficient_info(ar), "refs": [], "source": "insufficient", "debug": debug}
 
-    answer = answer_from_chunks(q, chunks, history=history)
+    answer = answer_from_chunks(q, ar, chunks, history)
+    refs = [c["title"] for c in chunks if c["title"]]
 
-    refs = [c["title"] for c in chunks if c.get("title")]
-    return {
-        "answer": answer,
-        "refs": refs,
-        "source": "rag",
-        "debug": debug,
-    }
-
+    return {"answer": answer, "refs": refs, "source": "rag", "debug": debug}
