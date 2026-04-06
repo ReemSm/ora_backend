@@ -18,7 +18,7 @@ MAX_HISTORY_CONTENT_LENGTH = 500
 REQUEST_TIMEOUT_SECONDS = 15
 
 ALLOWED_ORIGINS = [
-    "https://your-frontend-domain.com",
+    "https://ora-app.base44.app",
 ]
 
 executor = ThreadPoolExecutor(max_workers=10)
