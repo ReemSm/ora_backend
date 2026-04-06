@@ -1,388 +1,247 @@
 import os
 import re
+import time
+import math
+import hashlib
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import List, Dict, Any, Tuple, Optional, Callable
 
 from openai import OpenAI
 from pinecone import Pinecone
 
+
 logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s")
 log = logging.getLogger("ora")
 
-MODEL = "gpt-4o"
-EMBED_MODEL = "text-embedding-3-large"
-PINECONE_INDEX = "oraapp777"
 
-TOP_K_RAW = 12
-TOP_K_FINAL = 5
+@dataclass(frozen=True)
+class Config:
+    MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    EMBED_MODEL: str = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-large")
+    PINECONE_INDEX: str = os.getenv("PINECONE_INDEX", "oraapp777")
 
-MIN_TOP_SCORE = 0.52
-MIN_AVG_SCORE = 0.46
-MIN_TOTAL_CHARS = 220
+    TOP_K_RAW: int = 12
+    TOP_K_FINAL: int = 5
 
-MAX_REWRITE_TOKENS = 80
-MAX_ANSWER_TOKENS = 260
-TEMPERATURE = 0.0
+    MAX_REWRITE_OUTPUT_TOKENS: int = 64
+    MAX_ANSWER_OUTPUT_TOKENS: int = 260
+    TEMPERATURE: float = 0.25
 
-PINECONE_CHUNK_FIELD = "chunk_text"
-PINECONE_TITLE_FIELD = "title"
-PINECONE_AUTHORITY_FIELD = "authority_score"
+    PINECONE_CHUNK_FIELD: str = "chunk_text"
+    PINECONE_TITLE_FIELD: str = "title"
+    PINECONE_AUTHORITY_FIELD: str = "authority_score"
+    PINECONE_ID_FIELD: str = "id"
 
-CHUNK_FIELDS = ("chunk_text",)
+    HISTORY_CHAR_BUDGET: int = 2000
+    MAX_REFERENCE_TITLES: int = 3
+    MIN_AUTHORITY: float = 0.15
 
-HISTORY_CHAR_BUDGET = 2200
+    MAX_CONTEXT_CHARS: int = 6500
+    MAX_CHUNK_CHARS: int = 1500
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    OPENAI_TIMEOUT_SECONDS: float = 25.0
+    MAX_RETRIES: int = 4
+    RETRY_BASE_SECONDS: float = 0.8
+
+
+CFG = Config()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=CFG.OPENAI_TIMEOUT_SECONDS)
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index(PINECONE_INDEX)
+index = pc.Index(CFG.PINECONE_INDEX)
+
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+MULTISPACE_RE = re.compile(r"\s+")
+ROLE_PREFIX_RE = re.compile(r"^\s*(system|assistant|user)\s*:\s*", re.IGNORECASE)
 
-DENTAL_SIGNALS = [
-    "tooth", "teeth", "gum", "gums", "mouth", "oral", "dental", "dentist",
-    "jaw", "bite", "biting", "cavity", "filling", "crown", "implant",
-    "root canal", "braces", "plaque", "enamel", "dentin", "pulp",
-    "extraction", "wisdom tooth", "molar", "veneer", "whitening", "floss",
-    "gingivitis", "periodontitis", "pulpitis", "caries", "abscess",
-    "pain", "ache", "bleeding", "swelling", "sensitivity", "numbness",
-    "toothache", "ulcer", "mouth sore", "bad breath", "retainer", "aligner",
-    "سن", "أسنان", "ضرس", "لثة", "فم", "فك", "حشوة", "تاج", "زرعة",
-    "علاج العصب", "تقويم", "تبييض", "خيط الأسنان", "التهاب اللثة", "تسوس",
-    "خلع", "خراج", "ألم", "نزيف", "تورم", "حساسية", "خدر", "رائحة الفم",
-    "قرحة", "تقويم شفاف", "مثبت",
-]
 
-NON_DENTAL_SIGNALS = [
-    "capital of", "weather forecast", "stock price", "bitcoin", "movie review",
-    "football score", "basketball game", "president of", "election results",
-    "flight booking", "hotel booking", "travel itinerary", "real estate investment",
-    "car review", "vehicle specs", "iphone review", "laptop specs",
-    "software development", "coding tutorial", "recipe for", "investment advice",
-    "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين", "أفضل فيلم",
-    "نتيجة مباراة", "رئيس الوزراء", "نتائج انتخابات", "حجز فندق", "تذكرة طيران",
-    "استثمار عقاري", "مواصفات سيارة", "برمجة تطبيقات", "وصفة طبخ",
-]
+def with_retry(fn: Callable[[], Any], label: str):
+    for attempt in range(CFG.MAX_RETRIES):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == CFG.MAX_RETRIES - 1:
+                raise
+            time.sleep(CFG.RETRY_BASE_SECONDS * (2 ** attempt))
 
-PRESCRIPTION_PATTERNS = [
-    r"prescribe\s+(me\s+)?(a\s+)?medication",
-    r"write\s+(me\s+)?a\s+prescription",
-    r"give\s+me\s+a\s+specific\s+(prescription|treatment\s+plan)",
-    r"make\s+(me\s+)?a\s+(treatment|care)\s+plan\s+for\s+(me|my\s+case)",
-    r"tell\s+me\s+exactly\s+what\s+(drug|medication|antibiotic)\s+to\s+take",
-    r"diagnose\s+me\s+exactly",
-    r"وصّف\s+لي\s+دواء",
-    r"اعطني\s+وصفة",
-    r"أعطني\s+وصفة",
-    r"اكتب\s+لي\s+خطة\s+علاج",
-    r"شخّص\s+حالتي\s+بالضبط",
-]
 
-SOCIAL_EN = [
-    r"^(hi|hello|hey|good\s*(morning|afternoon|evening|day))[\s!.,?]*$",
-    r"^(thanks|thank\s*you|thx|tysm)[\s!.,?]*$",
-    r"^(bye|goodbye|see\s*you|take\s*care)[\s!.,?]*$",
-]
+def normalize_ws(text: str) -> str:
+    return MULTISPACE_RE.sub(" ", (text or "").strip())
 
-SOCIAL_AR = [
-    r"^(مرحبا|أهلاً|أهلا|هلا|السلام\s*عليكم|صباح\s*الخير|مساء\s*الخير)[\s!.,؟]*$",
-    r"^(شكرًا|شكراً|شكرا|ممنون|مشكور|يسلموا|يعطيك\s*العافية)[\s!.,؟]*$",
-    r"^(مع\s*السلامة|وداعاً|باي)[\s!.,؟]*$",
-]
+
+def sanitize_context(text: str) -> str:
+    text = (text or "").replace("\x00", " ")
+    lines = []
+    for l in text.splitlines():
+        l = ROLE_PREFIX_RE.sub("", l).strip()
+        if l:
+            lines.append(l)
+    return "\n".join(lines)[:CFG.MAX_CHUNK_CHARS]
+
+
+def hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def is_ar(text: str) -> bool:
-    return bool(ARABIC_RE.search(text or ""))
+    ar = len(ARABIC_RE.findall(text or ""))
+    en = len(re.findall(r"[A-Za-z]", text or ""))
+    return ar > en * 0.3
 
 
-def has_any_signal(text: str, signals: List[str]) -> bool:
-    tl = (text or "").lower()
-    return any(sig.lower() in tl for sig in signals)
-
-
-def is_treatment_request(q: str) -> bool:
-    ql = (q or "").lower()
-    return any(re.search(p, ql) for p in PRESCRIPTION_PATTERNS)
-
-
-def is_social_exchange(q: str) -> bool:
-    ql = (q or "").lower().strip()
-    qa = (q or "").strip()
-    return any(re.search(p, ql, re.IGNORECASE) for p in SOCIAL_EN) or any(re.search(p, qa) for p in SOCIAL_AR)
-
-
-def social_response(ar: bool, q: str) -> str:
-    if ar:
-        if re.search(r"شكر|ممنون|مشكور|يسلموا|يعطيك", q):
-            return "على الرحب والسعة."
-        if re.search(r"السلام\s*عليكم", q):
-            return "وعليكم السلام."
-        if re.search(r"مع\s*السلامة|وداعاً|باي", q):
-            return "مع السلامة."
-        return "أهلاً."
-    ql = (q or "").lower().strip()
-    if re.search(r"thanks|thank\s*you|thx", ql):
-        return "You're welcome."
-    if re.search(r"bye|goodbye|see\s*you|take\s*care", ql):
-        return "Take care."
-    return "Hello."
-
-
-def refusal_treatment(ar: bool) -> str:
-    if ar:
-        return "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. يُنصح بمراجعة طبيب أسنان مرخّص."
-    return "I can't prescribe medication or provide a personalised diagnosis. Please consult a licensed dentist."
-
-
-def refusal_scope(ar: bool) -> str:
-    if ar:
-        return "هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان."
-    return "This is outside the scope of this oral health application."
-
-
-def insufficient_info(ar: bool) -> str:
-    if ar:
-        return "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال."
-    return "I don't have enough grounded information to answer this reliably."
-
-
-def looks_explicitly_non_dental(q: str) -> bool:
-    ql = (q or "").lower()
-    return has_any_signal(ql, NON_DENTAL_SIGNALS) and not has_any_signal(ql, DENTAL_SIGNALS)
-
-
-def detect_question_type(q: str) -> str:
-    ql = (q or "").lower().strip()
-
-    instruction_patterns = [
-        "how to", "how do i", "what should i do", "what should i avoid",
-        "aftercare", "post-op", "postoperative", "after extraction",
-        "after root canal", "after implant", "after filling", "after treatment",
-        "can i eat", "can i drink", "when can i eat", "when can i drink",
-        "كيف أعتني", "ماذا أفعل بعد", "بعد الخلع", "بعد الزرعة", "بعد الحشوة",
-        "هل أقدر آكل", "هل أقدر أشرب", "تعليمات بعد", "العناية بعد",
-    ]
-    for pattern in instruction_patterns:
-        if pattern in ql:
-            return "instruction"
-
-    return "informational"
-
-
-def embed(text: str) -> List[float]:
-    return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
-
-
-def translate_to_english(q: str) -> str:
-    try:
-        r = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Translate the following Arabic dental query into clear, natural English for medical retrieval. Output only the translation.",
-                },
-                {"role": "user", "content": q},
-            ],
-            max_tokens=80,
-            temperature=0.0,
+def responses_text(messages, max_tokens, temp):
+    def _call():
+        return client.responses.create(
+            model=CFG.MODEL,
+            input=messages,
+            max_output_tokens=max_tokens,
+            temperature=temp,
         )
-        return (r.choices[0].message.content or "").strip() or q
-    except Exception as e:
-        log.error(f"Translation error: {e}")
-        return q
+    r = with_retry(_call, "openai")
+    return (getattr(r, "output_text", "") or "").strip()
 
 
-def rewrite_query_for_retrieval(q: str) -> str:
+@lru_cache(maxsize=512)
+def embed_cached(text: str):
+    def _call():
+        return client.embeddings.create(model=CFG.EMBED_MODEL, input=text)
+    r = with_retry(_call, "embed")
+    return tuple(r.data[0].embedding)
+
+
+def embed(text: str):
+    return list(embed_cached(normalize_ws(text)))
+
+
+def normalize_query(q: str, ar: bool):
+    system = "Convert to short English dental retrieval query. Max 15 words."
+    if ar:
+        system = "Translate to English and convert to short dental retrieval query. Max 15 words."
+    return responses_text(
+        [{"role": "system", "content": system}, {"role": "user", "content": q}],
+        CFG.MAX_REWRITE_OUTPUT_TOKENS,
+        0.0
+    ) or q
+
+
+def query_pinecone(vector):
+    def _call():
+        return index.query(vector=vector, top_k=CFG.TOP_K_RAW, include_metadata=True)
     try:
-        r = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Rewrite this into a short dental textbook retrieval query.\n"
-                        "One line only.\n"
-                        "No explanations.\n"
-                        "Under 25 words."
-                    ),
-                },
-                {"role": "user", "content": q},
-            ],
-            max_tokens=MAX_REWRITE_TOKENS,
-            temperature=0.0,
-        )
-        rewritten = (r.choices[0].message.content or "").strip()
-        return rewritten if rewritten else q
-    except Exception as e:
-        log.error(f"Rewrite error: {e}")
-        return q
-
-
-def extract_text(md: Dict[str, Any]) -> str:
-    val = md.get(PINECONE_CHUNK_FIELD)
-    return str(val).strip() if val else ""
-
-
-def normalize_authority_score(md: Dict[str, Any]) -> Optional[float]:
-    raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
-    if raw_auth is None:
-        return None
-    try:
-        return float(raw_auth)
+        return with_retry(_call, "pinecone").get("matches", [])
     except:
-        log.warning(f"Invalid authority_score: {raw_auth}")
-        return 0.0
-
-
-def query_pinecone(vector: List[float]) -> List[Dict[str, Any]]:
-    try:
-        res = index.query(vector=vector, top_k=TOP_K_RAW, include_metadata=True)
-        return res.get("matches", [])
-    except Exception as e:
-        log.error(f"Pinecone error: {e}")
         return []
 
 
-def merge_and_rank(matches_list: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+def merge(matches_list):
     all_chunks = []
-
     for matches in matches_list:
         for m in matches:
             md = m.get("metadata") or {}
-            text = extract_text(md)
+            text = sanitize_context(md.get(CFG.PINECONE_CHUNK_FIELD, ""))
             if not text:
                 continue
 
-            authority = normalize_authority_score(md)
-            if authority is not None and authority < 0.20:
+            auth = md.get(CFG.PINECONE_AUTHORITY_FIELD)
+            try:
+                auth = float(auth) if auth is not None else None
+            except:
+                auth = 0.0
+
+            if auth is not None and auth < CFG.MIN_AUTHORITY:
                 continue
 
+            score = float(m.get("score", 0))
+            blended = score if auth is None else score * 0.9 + auth * 0.1
+
             all_chunks.append({
-                "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
+                "id": md.get(CFG.PINECONE_ID_FIELD) or hash_text(text),
+                "title": md.get(CFG.PINECONE_TITLE_FIELD, ""),
                 "text": text,
-                "score": float(m.get("score", 0.0)),
+                "score": blended
             })
 
     all_chunks.sort(key=lambda x: x["score"], reverse=True)
 
     seen = set()
-    unique = []
-    for c in all_chunks:
-        key = c["text"][:200]
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-        if len(unique) >= TOP_K_FINAL:
-            break
-
-    return unique
-
-
-def retrieve_chunks(queries: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    debug = {"top_score": 0, "avg_score": 0, "total_chars": 0, "context_sufficient": False}
-
-    matches_list = []
-    for q in queries:
-        matches_list.append(query_pinecone(embed(q)))
-
-    chunks = merge_and_rank(matches_list)
-    if not chunks:
-        return [], debug
-
-    top = chunks[0]["score"]
-    avg = sum(c["score"] for c in chunks) / len(chunks)
-    total = sum(len(c["text"]) for c in chunks)
-
-    debug.update({
-        "top_score": top,
-        "avg_score": avg,
-        "total_chars": total,
-        "context_sufficient": top >= MIN_TOP_SCORE and (avg >= MIN_AVG_SCORE or total >= MIN_TOTAL_CHARS)
-    })
-
-    return chunks, debug
-
-
-def build_history_messages(history):
-    if not history:
-        return []
-
     out = []
-    size = 0
-    for turn in reversed(history):
-        content = turn.get("content", "")
-        if size + len(content) > HISTORY_CHAR_BUDGET:
+    for c in all_chunks:
+        if c["id"] in seen:
+            continue
+        seen.add(c["id"])
+        out.append(c)
+        if len(out) >= CFG.TOP_K_FINAL:
             break
-        out.append(turn)
-        size += len(content)
 
-    return list(reversed(out))
+    return out
 
 
-def answer_from_chunks(q, ar, chunks, history=None):
-    context = "\n\n".join(c["text"] for c in chunks)
+def build_context(chunks):
+    ctx = ""
+    for i, c in enumerate(chunks):
+        block = f"[{i+1}] {c['text']}\n\n"
+        if len(ctx) + len(block) > CFG.MAX_CONTEXT_CHARS:
+            break
+        ctx += block
+    return ctx
+
+
+def answer_from_chunks(q, ar, chunks):
+    ctx = build_context(chunks)
 
     system = (
-        "Answer clearly using only the reference.\n"
-        "Keep it natural and not academic.\n"
-        "If not enough info, say so.\n"
-        f"REFERENCE:\n{context}"
+        "You are a dental assistant. Use reference.\n"
+        "Answer even if partial. Do not hallucinate specifics.\n"
+        "If unsure, say limited info.\n"
     )
 
     if ar:
         system = (
             "أنت مساعد صحة فم وأسنان.\n"
-            "اشرح ببساطة وبأسلوب طبيعي.\n"
-            "استخدم فقط النص.\n"
-            "إذا لم تكفِ المعلومات، قل ذلك.\n"
-            f"REFERENCE:\n{context}"
+            "استخدم المرجع فقط.\n"
+            "إذا كانت المعلومات جزئية، أعطِ إجابة مفيدة بدون مبالغة.\n"
+            "إذا غير متأكد، وضح أن المعلومات محدودة.\n"
         )
 
-    messages = [{"role": "system", "content": system}]
-    messages += build_history_messages(history)
-    messages.append({"role": "user", "content": q})
-
-    try:
-        r = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            max_tokens=MAX_ANSWER_TOKENS,
-            temperature=TEMPERATURE,
-        )
-        return (r.choices[0].message.content or "").strip()
-    except:
-        return insufficient_info(ar)
+    return responses_text(
+        [{"role": "system", "content": system + ctx}, {"role": "user", "content": q}],
+        CFG.MAX_ANSWER_OUTPUT_TOKENS,
+        CFG.TEMPERATURE
+    )
 
 
-def generate_answer(q: str, history=None):
+def generate_answer(q: str):
     q = (q or "").strip()
     ar = is_ar(q)
 
     if not q:
-        return {"answer": "Empty query.", "refs": [], "source": "error", "debug": {}}
+        return {"answer": "Empty", "refs": []}
 
-    if is_treatment_request(q):
-        return {"answer": refusal_treatment(ar), "refs": [], "source": "safety_refusal", "debug": {}}
+    rq = normalize_query(q, ar)
 
-    if is_social_exchange(q):
-        return {"answer": social_response(ar, q), "refs": [], "source": "social", "debug": {}}
+    queries = [q]
+    if rq != q:
+        queries.append(rq)
 
-    base_query = q
-    if ar:
-        base_query = translate_to_english(q)
+    matches = []
+    for qu in queries:
+        matches.append(query_pinecone(embed(qu)))
 
-    rewritten = rewrite_query_for_retrieval(base_query)
+    chunks = merge(matches)
 
-    queries = [base_query]
-    if rewritten and rewritten != base_query:
-        queries.append(rewritten)
+    if not chunks:
+        return {"answer": "No info found.", "refs": []}
 
-    chunks, debug = retrieve_chunks(queries)
+    ans = answer_from_chunks(q, ar, chunks)
 
-    if not chunks or not debug["context_sufficient"]:
-        return {"answer": insufficient_info(ar), "refs": [], "source": "insufficient", "debug": debug}
+    refs = []
+    for c in chunks:
+        if c["title"] and c["title"] not in refs:
+            refs.append(c["title"])
+        if len(refs) >= CFG.MAX_REFERENCE_TITLES:
+            break
 
-    answer = answer_from_chunks(q, ar, chunks, history)
-    refs = [c["title"] for c in chunks if c["title"]]
-
-    return {"answer": answer, "refs": refs, "source": "rag", "debug": debug}
+    return {"answer": ans, "refs": refs}
