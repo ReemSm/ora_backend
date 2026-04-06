@@ -12,9 +12,6 @@ from pydantic import BaseModel, field_validator
 import step3_dataset_gpt_with_contract_and_strict_rag as rag
 
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
@@ -30,23 +27,17 @@ logging.basicConfig(level=logging.INFO, format="[API %(levelname)s] %(message)s"
 log = logging.getLogger("api")
 
 
-# ─────────────────────────────────────────────────────────────
-# APP
-# ─────────────────────────────────────────────────────────────
 app = FastAPI(title="ORA Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ─────────────────────────────────────────────────────────────
-# MODELS
-# ─────────────────────────────────────────────────────────────
 class HistoryTurn(BaseModel):
     role: Literal["user", "assistant"]
     content: str
@@ -85,14 +76,11 @@ class AskResponse(BaseModel):
     latency_ms: float
 
 
-# ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
 def normalize_history(history: List[HistoryTurn] | None) -> List[dict]:
     if not history:
         return []
     trimmed = history[-MAX_HISTORY_TURNS:]
-    return [{"role": item.role, "content": item.content.strip()} for item in trimmed]
+    return [{"role": item.role, "content": item.content} for item in trimmed]
 
 
 async def run_generate_answer(query: str, history: List[dict]) -> dict:
@@ -103,16 +91,13 @@ async def run_generate_answer(query: str, history: List[dict]) -> dict:
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# ENDPOINTS
-# ─────────────────────────────────────────────────────────────
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
     request_id = str(uuid.uuid4())
     started = time.perf_counter()
 
     try:
-        query = req.query.strip()
+        query = req.query
         history = normalize_history(req.history)
 
         log.info(f"[{request_id}] /ask query={query[:120]!r} history_turns={len(history)}")
