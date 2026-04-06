@@ -6,7 +6,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Dict, Any, Tuple, Optional, Callable
+from typing import List, Dict, Any, Callable
 
 from openai import OpenAI
 from pinecone import Pinecone
@@ -58,11 +58,11 @@ MULTISPACE_RE = re.compile(r"\s+")
 ROLE_PREFIX_RE = re.compile(r"^\s*(system|assistant|user)\s*:\s*", re.IGNORECASE)
 
 
-def with_retry(fn: Callable[[], Any], label: str):
+def with_retry(fn: Callable[[], any], label: str):
     for attempt in range(CFG.MAX_RETRIES):
         try:
             return fn()
-        except Exception as e:
+        except Exception:
             if attempt == CFG.MAX_RETRIES - 1:
                 raise
             time.sleep(CFG.RETRY_BASE_SECONDS * (2 ** attempt))
@@ -213,7 +213,7 @@ def answer_from_chunks(q, ar, chunks):
     )
 
 
-def generate_answer(q: str):
+def generate_answer(q: str, history=None):
     q = (q or "").strip()
     ar = is_ar(q)
 
