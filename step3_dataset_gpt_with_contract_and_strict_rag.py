@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any
 
 from openai import OpenAI
 from pinecone import Pinecone
@@ -15,22 +15,10 @@ PINECONE_INDEX = "oraapp777"
 
 TOP_K_RAW = 12
 TOP_K_FINAL = 5
-
-MIN_TOP_SCORE = 0.52
-MIN_AVG_SCORE = 0.46
-MIN_TOTAL_CHARS = 220
-
-MAX_REWRITE_TOKENS = 80
 MAX_ANSWER_TOKENS = 260
-TEMPERATURE = 0.0
 
 PINECONE_CHUNK_FIELD = "chunk_text"
 PINECONE_TITLE_FIELD = "title"
-PINECONE_AUTHORITY_FIELD = "authority_score"
-
-HISTORY_CHAR_BUDGET = 2200
-MAX_REFERENCE_TITLES = 3
-MIN_AUTHORITY = 0.20
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
@@ -38,138 +26,13 @@ index = pc.Index(PINECONE_INDEX)
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
 
-DENTAL_SIGNALS = [
-    "tooth", "teeth", "gum", "gums", "mouth", "oral", "dental", "dentist",
-    "jaw", "bite", "biting", "cavity", "filling", "crown", "implant",
-    "root canal", "braces", "plaque", "enamel", "dentin", "pulp",
-    "extraction", "wisdom tooth", "molar", "veneer", "whitening", "floss",
-    "gingivitis", "periodontitis", "pulpitis", "caries", "abscess",
-    "pain", "ache", "bleeding", "swelling", "sensitivity", "numbness",
-    "toothache", "ulcer", "mouth sore", "bad breath", "retainer", "aligner",
-    "سن", "أسنان", "ضرس", "لثة", "فم", "فك", "حشوة", "تاج", "زرعة",
-    "علاج العصب", "تقويم", "تبييض", "خيط الأسنان", "التهاب اللثة", "تسوس",
-    "خلع", "خراج", "ألم", "نزيف", "تورم", "حساسية", "خدر", "رائحة الفم",
-    "قرحة", "تقويم شفاف", "مثبت",
-]
-
-NON_DENTAL_SIGNALS = [
-    "capital of", "weather forecast", "stock price", "bitcoin", "movie review",
-    "football score", "basketball game", "president of", "election results",
-    "flight booking", "hotel booking", "travel itinerary", "real estate investment",
-    "car review", "vehicle specs", "iphone review", "laptop specs",
-    "software development", "coding tutorial", "recipe for", "investment advice",
-    "عاصمة دولة", "توقعات الطقس", "أسعار الأسهم", "بيتكوين", "أفضل فيلم",
-    "نتيجة مباراة", "رئيس الوزراء", "نتائج انتخابات", "حجز فندق", "تذكرة طيران",
-    "استثمار عقاري", "مواصفات سيارة", "برمجة تطبيقات", "وصفة طبخ",
-]
-
-PRESCRIPTION_PATTERNS = [
-    r"prescribe\s+(me\s+)?(a\s+)?medication",
-    r"write\s+(me\s+)?a\s+prescription",
-    r"give\s+me\s+a\s+specific\s+(prescription|treatment\s+plan)",
-    r"make\s+(me\s+)?a\s+(treatment|care)\s+plan\s+for\s+(me|my\s+case)",
-    r"tell\s+me\s+exactly\s+what\s+(drug|medication|antibiotic)\s+to\s+take",
-    r"diagnose\s+me\s+exactly",
-    r"وصّف\s+لي\s+دواء",
-    r"اعطني\s+وصفة",
-    r"أعطني\s+وصفة",
-    r"اكتب\s+لي\s+خطة\s+علاج",
-    r"شخّص\s+حالتي\s+بالضبط",
-]
-
-SOCIAL_EN = [
-    r"^(hi|hello|hey|good\s*(morning|afternoon|evening|day))[\s!.,?]*$",
-    r"^(thanks|thank\s*you|thx|tysm)[\s!.,?]*$",
-    r"^(bye|goodbye|see\s*you|take\s*care)[\s!.,?]*$",
-]
-
-SOCIAL_AR = [
-    r"^(مرحبا|أهلاً|أهلا|هلا|السلام\s*عليكم|صباح\s*الخير|مساء\s*الخير)[\s!.,؟]*$",
-    r"^(شكرًا|شكراً|شكرا|ممنون|مشكور|يسلموا|يعطيك\s*العافية)[\s!.,؟]*$",
-    r"^(مع\s*السلامة|وداعاً|باي)[\s!.,؟]*$",
-]
+# cache
+_query_cache = {}
+_embedding_cache = {}
 
 
 def is_ar(text: str) -> bool:
     return bool(ARABIC_RE.search(text or ""))
-
-
-def has_any_signal(text: str, signals: List[str]) -> bool:
-    tl = (text or "").lower()
-    return any(sig.lower() in tl for sig in signals)
-
-
-def is_treatment_request(q: str) -> bool:
-    ql = (q or "").lower()
-    return any(re.search(p, ql) for p in PRESCRIPTION_PATTERNS)
-
-
-def is_social_exchange(q: str) -> bool:
-    ql = (q or "").lower().strip()
-    qa = (q or "").strip()
-    return any(re.search(p, ql, re.IGNORECASE) for p in SOCIAL_EN) or any(re.search(p, qa) for p in SOCIAL_AR)
-
-
-def social_response(ar: bool, q: str) -> str:
-    if ar:
-        if re.search(r"شكر|ممنون|مشكور|يسلموا|يعطيك", q):
-            return "على الرحب والسعة."
-        if re.search(r"السلام\s*عليكم", q):
-            return "وعليكم السلام."
-        if re.search(r"مع\s*السلامة|وداعاً|باي", q):
-            return "مع السلامة."
-        return "أهلاً."
-    ql = (q or "").lower().strip()
-    if re.search(r"thanks|thank\s*you|thx", ql):
-        return "You're welcome."
-    if re.search(r"bye|goodbye|see\s*you|take\s*care", ql):
-        return "Take care."
-    return "Hello."
-
-
-def refusal_treatment(ar: bool) -> str:
-    if ar:
-        return "ما أقدر أوصف أدوية أو أقدم تشخيصاً مخصصاً. يُنصح بمراجعة طبيب أسنان مرخّص."
-    return "I can't prescribe medication or provide a personalised diagnosis. Please consult a licensed dentist."
-
-
-def refusal_scope(ar: bool) -> str:
-    if ar:
-        return "هذا السؤال خارج نطاق تطبيق صحة الفم والأسنان."
-    return "This is outside the scope of this oral health application."
-
-
-def insufficient_info(ar: bool) -> str:
-    if ar:
-        return "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال."
-    return "I don't have enough grounded information to answer this reliably."
-
-
-def looks_explicitly_non_dental(q: str) -> bool:
-    ql = (q or "").lower()
-    return has_any_signal(ql, NON_DENTAL_SIGNALS) and not has_any_signal(ql, DENTAL_SIGNALS)
-
-
-def detect_question_type(q: str) -> str:
-    ql = (q or "").lower().strip()
-
-    instruction_patterns = [
-        "how to", "how do i", "what should i do", "what should i avoid",
-        "aftercare", "post-op", "postoperative", "after extraction",
-        "after root canal", "after implant", "after filling", "after treatment",
-        "can i eat", "can i drink", "when can i eat", "when can i drink",
-        "كيف أعتني", "ماذا أفعل بعد", "بعد الخلع", "بعد الزرعة", "بعد الحشوة",
-        "هل أقدر آكل", "هل أقدر أشرب", "تعليمات بعد", "العناية بعد",
-    ]
-    for pattern in instruction_patterns:
-        if pattern in ql:
-            return "instruction"
-
-    return "informational"
-
-
-def embed(text: str) -> List[float]:
-    return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
 
 
 def translate_to_english(q: str) -> str:
@@ -177,14 +40,10 @@ def translate_to_english(q: str) -> str:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Translate the following Arabic dental query into clear, natural English for medical retrieval. Output only the translation.",
-                },
+                {"role": "system", "content": "Translate to clear English for dental retrieval. Output only translation."},
                 {"role": "user", "content": q},
             ],
-            max_tokens=80,
-            temperature=0.0,
+            temperature=0,
         )
         return (r.choices[0].message.content or "").strip() or q
     except Exception as e:
@@ -193,315 +52,259 @@ def translate_to_english(q: str) -> str:
 
 
 def rewrite_query_for_retrieval(q: str) -> str:
+    if q in _query_cache:
+        return _query_cache[q]
+
     try:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Rewrite this into a short dental textbook retrieval query.\n"
-                        "One line only.\n"
-                        "No explanations.\n"
-                        "Under 25 words."
-                    ),
-                },
+                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning."},
                 {"role": "user", "content": q},
             ],
-            max_tokens=MAX_REWRITE_TOKENS,
-            temperature=0.0,
+            temperature=0,
         )
-        rewritten = (r.choices[0].message.content or "").strip()
-        return rewritten if rewritten else q
+        out = (r.choices[0].message.content or "").strip() or q
+        _query_cache[q] = out
+        return out
     except Exception as e:
         log.error(f"Rewrite error: {e}")
         return q
 
 
+def embed(text: str):
+    if text in _embedding_cache:
+        return _embedding_cache[text]
+
+    emb = client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+    _embedding_cache[text] = emb
+    return emb
+
+
 def extract_text(md: Dict[str, Any]) -> str:
-    val = md.get(PINECONE_CHUNK_FIELD)
-    return str(val).strip() if val else ""
+    return str(md.get(PINECONE_CHUNK_FIELD) or "").strip()
 
 
-def normalize_authority_score(md: Dict[str, Any]) -> Optional[float]:
-    raw_auth = md.get(PINECONE_AUTHORITY_FIELD)
-    if raw_auth is None:
-        return None
+def retrieve_chunks(query: str):
     try:
-        return float(raw_auth)
-    except Exception:
-        log.warning(f"Invalid authority_score: {raw_auth}")
-        return 0.0
-
-
-def query_pinecone(vector: List[float]) -> List[Dict[str, Any]]:
-    try:
-        res = index.query(vector=vector, top_k=TOP_K_RAW, include_metadata=True)
-        return res.get("matches", [])
+        res = index.query(vector=embed(query), top_k=TOP_K_RAW, include_metadata=True)
+        matches = res.get("matches", [])
     except Exception as e:
-        log.error(f"Pinecone error: {e}")
+        log.error(f"Retrieval error: {e}")
         return []
 
+    chunks = []
+    for m in matches:
+        md = m.get("metadata") or {}
+        text = extract_text(md)
+        if not text:
+            continue
 
-def merge_and_rank(matches_list: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
-    all_chunks = []
+        chunks.append({
+            "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
+            "text": text,
+            "score": float(m.get("score", 0)),
+        })
 
-    for matches in matches_list:
-        for m in matches:
-            md = m.get("metadata") or {}
-            text = extract_text(md)
-            if not text:
-                continue
-
-            authority = normalize_authority_score(md)
-            if authority is not None and authority < MIN_AUTHORITY:
-                continue
-
-            all_chunks.append({
-                "title": str(md.get(PINECONE_TITLE_FIELD) or "").strip(),
-                "text": text,
-                "score": float(m.get("score", 0.0)),
-            })
-
-    all_chunks.sort(key=lambda x: x["score"], reverse=True)
+    chunks.sort(key=lambda x: x["score"], reverse=True)
 
     seen = set()
     unique = []
-    for c in all_chunks:
-        key = c["text"][:200]
-        if key not in seen:
-            seen.add(key)
+    for c in chunks:
+        if c["title"] not in seen:
+            seen.add(c["title"])
             unique.append(c)
         if len(unique) >= TOP_K_FINAL:
             break
 
+    # rag visibility
+    log.info(f"RAG chunks used: {[c['title'] for c in unique]}")
+    log.info(f"RAG scores: {[c['score'] for c in unique]}")
+
     return unique
 
 
-def retrieve_chunks(queries: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    debug = {
-        "top_score": 0,
-        "avg_score": 0,
-        "total_chars": 0,
-        "context_sufficient": False,
-    }
+def build_system_prompt(context: str, lang: str) -> str:
+    return f"""
+You are an oral health assistant.
 
-    matches_list = []
-    for q in queries:
-        matches_list.append(query_pinecone(embed(q)))
+Output language: {lang}
 
-    chunks = merge_and_rank(matches_list)
-    if not chunks:
-        return [], debug
+Determine if the query is instruction or informational before answering and follow the correct format strictly.
 
-    top = chunks[0]["score"]
-    avg = sum(c["score"] for c in chunks) / len(chunks)
-    total = sum(len(c["text"]) for c in chunks)
+Follow these rules strictly:
 
-    debug.update({
-        "top_score": top,
-        "avg_score": avg,
-        "total_chars": total,
-        "context_sufficient": top >= MIN_TOP_SCORE and (avg >= MIN_AVG_SCORE or total >= MIN_TOTAL_CHARS)
-    })
+- No introductions
+- No empathy statements
+- No reassurance
+- No follow-up questions
+- No emojis
+- No dashes
+- No filler or extra commentary
 
-    return chunks, debug
+- Answer only what the user asked
+- Do not add information that was not requested
+- Do not drift away from the question
+- Do not hallucinate
+- Use only the reference material provided
+
+- Be direct and clinically accurate
+- Use simple, clear wording
+
+- If instruction:
+  - Output must be bullet points using • only
+  - Each point is one clear step
+  - No text before or after bullets
+
+- If informational:
+  - Output must be plain text
+  - No bullet points
+
+Arabic rules:
+- Use natural clinical Arabic, not formal textbook language
+- No literal translation
+- Always use: قطعة الشاش for gauze
+
+Examples:
+
+Q: my tooth hurts
+A: Common reasons for tooth pain are cavities, pulp inflammation (the nerve of the tooth), or gum inflammation. Sometimes the pain comes from another tooth or from areas like sinusitis. If it continues or gets worse, a dental checkup is recommended.
+
+Q: أسناني تعورني
+A: من الأسباب الشائعة لألم الأسنان التسوس، التهاب العصب، أو التهاب اللثة. أحياناً يكون الألم من سن آخر أو من الجيوب الأنفية. إذا استمر الألم أو زاد ننصحك بزيارة طبيب أسنان مرخص.
+
+Q: I just had a tooth extraction what should I do
+A:
+• Bite on gauze for 30 minutes after the procedure
+• Use a cold compress on the area during the first 30 minutes
+• Do not spit or move water inside your mouth for 24 hours
+• Do not use a straw for 24 hours
+• Avoid hot or hard food
+• Clean your teeth normally but avoid the procedure site
+• Follow prescribed medication if given
+• Avoid smoking and physical activity for 24 hours
+
+Q: خلعت سني وش أسوي
+A:
+• اضغط على قطعة الشاش أول 30 دقيقة بعد الإجراء
+• استخدم كمادات باردة على المنطقة خلال أول 30 دقيقة
+• لا تبصق ولا تحرك الماء داخل الفم لمدة 24 ساعة (بما في ذلك المضمضة وقت الوضوء)
+• لا تستخدم الشفاط أو المصاص لمدة 24 ساعة
+• تجنب الأكل القاسي أو الساخن
+• نظف أسنانك بشكل طبيعي مع تجنب مكان الخلع
+• التزم بالأدوية الموصوفة إذا تم وصفها
+• تجنب التدخين والجهد البدني لمدة 24 ساعة
+
+Q: I had teeth whitening what should I do after
+A:
+• Sensitivity after whitening is normal and varies from one person to another, but it is usually strongest during the first two to three days and then settles gradually
+• You can take over the counter pain relief if the sensitivity is bothering you
+• Avoid anything that can stain your teeth like coffee, tea, spices, or strongly colored food and drinks for at least two weeks
+• Avoid smoking, vaping, and tobacco for at least two weeks
+• Avoid whitening toothpaste
+• Avoid colored toothpaste and colored mouth rinses
+• Use toothpaste designed for sensitivity and you can leave it on your teeth for about a minute before brushing (follow the instructions provided by the toothpaste company)
+• Use floss to keep areas between teeth clean and reduce staining
+• Fluoridated mouth rinses can help as long as they are not colored
+
+Q: سويت تبييض وش أسوي بعد
+A:
+• الحساسية بعد التبييض طبيعية وتختلف من شخص لآخر وخاصة خلال أول يومين إلى ثلاثة وتخف تدريجياً بعد ذلك
+• يمكن استخدام مسكنات مثل البنادول أو الباراسيتامول إذا كانت الحساسية مزعجة خاصة خلال الأيام الأولى
+• تجنب الأطعمة والمشروبات المسببة للتصبغات مثل القهوة والشاي أو البهارات الملونة لمدة أسبوعين على الأقل
+• تجنب التدخين أو الفيب أو أي منتجات تبغ لمدة أسبوعين على الأقل
+• تجنب معاجين التبييض
+• تجنب معاجين الأسنان أو غسولات الفم الملونة
+• استخدم معجون مخصص للحساسية ويمكن تركه على الأسنان لمدة دقيقة قبل التفريش (اتبع تعليمات الشركة المصنعة)
+• استخدام الخيط يساعد في تنظيف المناطق بين الأسنان ويقلل من حدوث تصبغات بينها
+• يمكن استخدام غسول يحتوي على الفلورايد وقد يساعد في تخفيف حساسية الأسنان بشرط أن يكون غير ملون
+
+Q: how does surgical extraction work
+A:
+• Clinical and radiographic assessment, usually with 3D imaging, is done first
+• Local anesthesia is given and the area is fully numbed
+• A small incision is made to access the tooth
+• A small amount of bone may be removed if needed
+• The tooth may be divided into sections
+• Each part is removed carefully
+• The area is cleaned and sutures are placed
+
+Q: كيف يتم الخلع الجراحي
+A:
+• يتم تقييم الحالة سريرياً وبالأشعة وغالباً باستخدام أشعة ثلاثية الأبعاد
+• يتم إعطاء تخدير موضعي حتى يتم التخدير الكامل
+• يتم عمل فتحة بسيطة للوصول إلى السن
+• قد يتم إزالة جزء بسيط من العظم إذا لزم
+• قد يتم تقسيم السن إلى أجزاء لتسهيل الإزالة
+• يتم إزالة كل جزء بحذر
+• يتم تنظيف المنطقة ويتم وضع غرز
+
+Q: my final wisdom tooth is coming in and it hurts so bad
+A: Pain with a wisdom tooth coming in is usually due to inflammation of the gum over the tooth, lack of space causing pressure, or decay if part of the tooth is exposed.
+
+Q: ضرس العقل يعورني
+A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
+
+Q: all my teeth hurt
+A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
+
+Q: أسناني كلها توجعني
+A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
+
+Q: nothing helps and all my teeth hurt
+A: Widespread pain that does not improve often points to a deeper issue like nerve inflammation where pain is felt across multiple teeth.
+
+Q: ولا شي يخفف الألم وكل أسناني تعورني
+A: إذا الألم منتشر وما يتحسن غالباً يكون بسبب مشكلة أعمق مثل التهاب في العصب ويكون الإحساس بالألم في أكثر من سن.
+
+Q: will painkillers fix the pain
+A: Painkillers reduce the pain temporarily but do not treat the underlying cause such as decay or inflammation.
+
+Q: المسكنات تعالج ألم الأسنان
+A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
+
+REFERENCE MATERIAL:
+{context}
+"""
 
 
-def build_history_messages(history):
-    if not history:
-        return []
+def answer_from_chunks(q: str, chunks, lang: str):
+    context = "\n\n".join(c["text"] for c in chunks)
+    system = build_system_prompt(context, lang)
 
-    out = []
-    size = 0
-    for turn in reversed(history):
-        content = (turn.get("content") or "").strip()
-        role = turn.get("role")
-        if role not in ("user", "assistant") or not content:
-            continue
-        if size + len(content) > HISTORY_CHAR_BUDGET:
-            break
-        out.append({"role": role, "content": content})
-        size += len(content)
-
-    return list(reversed(out))
-
-
-def build_system_prompt(ar: bool, qtype: str, context: str) -> str:
-    if ar:
-        if qtype == "instruction":
-            return (
-                "أنت مساعد صحة فم وأسنان.\n"
-                "استخدم فقط النص المرجعي.\n"
-                "استخدم أسلوب عربي طبيعي بسيط مثل شرح الطبيب للمريض.\n"
-                "لا تستخدم ترجمة حرفية.\n"
-                "لا تستخدم لغة أكاديمية أو رسمية ثقيلة.\n"
-                "لا تكتب أي مقدمة.\n"
-                "ابدأ مباشرة بالنقاط.\n"
-                "استخدم الرمز • فقط.\n"
-                "من 4 إلى 9 نقاط.\n"
-                "كل نقطة جملة قصيرة مباشرة.\n"
-                "رتب النقاط حسب الأولوية بعد الإجراء مباشرة.\n"
-                "\n"
-                "مثال يجب اتباعه في الأسلوب:\n"
-                "• اضغط على قطعة الشاش أول 30 دقيقة بعد الإجراء\n"
-                "• استخدام الكمادات الباردة على منطقة الخلع لمدة أول 30 دقيقة بعد الإجراء\n"
-                "• لا تبصق ولا تحرك الماء داخل الفم لمدة 24 ساعة\n"
-                "• تجنب استخدام المضمضة لمدة 24 ساعة (بما في ذلك المضمضة وقت الوضوء)\n"
-                "• لا تستخدم الشفاط أو المصاص وقت الشرب لمدة 24 ساعة\n"
-                "• تجنب الأكل القاسي أو الساخن\n"
-                "• نظف أسنانك بشكل طبيعي مع تجنب منطقة الإجراء\n"
-                "• التزم بالأدوية الموصوفة إن وجدت\n"
-                "• تجنب التدخين والجهد البدني لمدة 24 ساعة\n"
-                "• إزالة الغرز تكون حسب تعليمات الطبيب\n"
-                "\n"
-                "إذا لم تكفِ المعلومات اكتب فقط:\n"
-                "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال.\n"
-                "\n"
-                "REFERENCE MATERIAL:\n"
-                f"{context}"
-            )
-
-        return (
-            "أنت مساعد صحة فم وأسنان.\n"
-            "استخدم فقط النص المرجعي.\n"
-            "استخدم أسلوب عربي طبيعي بسيط مثل شرح الطبيب للمريض.\n"
-            "يمكنك ذكر الأسباب الشائعة المعروفة في طب الأسنان إذا كانت أساسية ومقبولة.\n"
-            "لا تستخدم ترجمة حرفية.\n"
-            "لا تستخدم لغة أكاديمية أو رسمية ثقيلة.\n"
-            "لا تكتب أي مقدمة.\n"
-            "ابدأ مباشرة بالمعلومة.\n"
-            "من جملتين إلى ثلاث جمل كحد أقصى.\n"
-            "\n"
-            "مثال يجب اتباعه في الأسلوب:\n"
-            "من الأسباب الشائعة لألم الأسنان التسوس، التهاب العصب، أو التهاب في اللثة. "
-            "أحياناً يكون الألم من سن آخر أو من الجيوب الأنفية. "
-            "إذا استمر الألم أو زاد ننصحك بزيارة طبيب أسنان مرخص.\n"
-            "\n"
-            "إذا لم تكفِ المعلومات اكتب فقط:\n"
-            "المعلومات المتاحة لدي لا تكفي للإجابة بشكل موثوق على هذا السؤال.\n"
-            "\n"
-            "REFERENCE MATERIAL:\n"
-            f"{context}"
-        )
-
-    if qtype == "instruction":
-        return (
-            "You are an oral health assistant.\n"
-            "Use only the reference material.\n"
-            "Do not use academic or textbook tone.\n"
-            "Do not write any introduction.\n"
-            "Start directly with bullet points.\n"
-            "Use the • symbol only.\n"
-            "4 to 9 bullet points.\n"
-            "Each bullet is one short direct action.\n"
-            "Order steps by immediate priority after the procedure.\n"
-            "\n"
-            "Example style:\n"
-            "• Bite on gauze for 30 minutes\n"
-            "• Use a cold compress after that\n"
-            "• Do not spit or move water in your mouth for 24 hours\n"
-            "• Do not use a straw for 24 hours\n"
-            "• Avoid hot or solid food\n"
-            "• Clean your teeth normally but avoid the procedure site\n"
-            "• Follow prescribed medication if given\n"
-            "• Avoid smoking and physical activity for 24 hours\n"
-            "• Remove sutures as instructed by your dentist\n"
-            "\n"
-            "If the material is not enough, output only:\n"
-            "I don't have enough grounded information to answer this reliably.\n"
-            "\n"
-            "REFERENCE MATERIAL:\n"
-            f"{context}"
-        )
-
-    return (
-        "You are an oral health assistant.\n"
-        "Use only the reference material.\n"
-        "You may include common basic dental causes if they are standard and widely accepted.\n"
-        "Do not use academic or textbook tone.\n"
-        "Do not write any introduction.\n"
-        "Start directly with useful information.\n"
-        "2 to 3 sentences maximum.\n"
-        "\n"
-        "Example style:\n"
-        "Common reasons for tooth pain are cavities, pulp inflammation (the nerve of the tooth), or gum inflammation. "
-        "Sometimes the pain is referred from another tooth or from areas like sinusitis. "
-        "If it continues or gets worse, a dental checkup with a licensed dentist is recommended.\n"
-        "\n"
-        "If the material is not enough, output only:\n"
-        "I don't have enough grounded information to answer this reliably.\n"
-        "\n"
-        "REFERENCE MATERIAL:\n"
-        f"{context}"
+    r = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": q},
+        ],
+        temperature=0,
+        max_tokens=MAX_ANSWER_TOKENS,
     )
 
-
-def answer_from_chunks(q, ar, chunks, history=None):
-    context = "\n\n".join(c["text"] for c in chunks)
-    system = build_system_prompt(ar, detect_question_type(q), context)
-
-    messages = [{"role": "system", "content": system}]
-    messages += build_history_messages(history)
-    messages.append({"role": "user", "content": q})
-
-    try:
-        r = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            max_tokens=MAX_ANSWER_TOKENS,
-            temperature=TEMPERATURE,
-        )
-        return (r.choices[0].message.content or "").strip()
-    except Exception:
-        return insufficient_info(ar)
+    return (r.choices[0].message.content or "").strip()
 
 
-def generate_answer(q: str, history=None):
+def generate_answer(q: str):
     q = (q or "").strip()
+
     ar = is_ar(q)
+    lang = "arabic" if ar else "english"
 
-    if not q:
-        return {"answer": "Empty query.", "refs": [], "source": "error", "debug": {}}
+    base_query = translate_to_english(q) if ar else q
+    clean_query = rewrite_query_for_retrieval(base_query)
 
-    if is_treatment_request(q):
-        return {"answer": refusal_treatment(ar), "refs": [], "source": "safety_refusal", "debug": {}}
+    chunks = retrieve_chunks(clean_query)
 
-    if is_social_exchange(q):
-        return {"answer": social_response(ar, q), "refs": [], "source": "social", "debug": {}}
+    if not chunks:
+        return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
 
-    base_query = q
-    if ar:
-        base_query = translate_to_english(q)
+    answer = answer_from_chunks(q, chunks, lang)
 
-    rewritten = rewrite_query_for_retrieval(base_query)
+    refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
-    queries = [base_query]
-    if rewritten and rewritten != base_query:
-        queries.append(rewritten)
-
-    chunks, debug = retrieve_chunks(queries)
-
-    if not chunks or not debug["context_sufficient"]:
-        source = "insufficient"
-        answer = insufficient_info(ar)
-
-        if looks_explicitly_non_dental(q):
-            source = "scope_refusal"
-            answer = refusal_scope(ar)
-
-        return {"answer": answer, "refs": [], "source": source, "debug": debug}
-
-    answer = answer_from_chunks(q, ar, chunks, history)
-
-    seen_titles = set()
-    refs = []
-    for c in chunks:
-        title = (c.get("title") or "").strip()
-        if title and title not in seen_titles:
-            seen_titles.add(title)
-            refs.append(title)
-        if len(refs) >= MAX_REFERENCE_TITLES:
-            break
-
-    return {"answer": answer, "refs": refs, "source": "rag", "debug": debug}
+    return {
+        "answer": answer,
+        "refs": refs,
+        "source": "rag"
+    }
