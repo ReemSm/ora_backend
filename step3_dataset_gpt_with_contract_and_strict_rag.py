@@ -150,9 +150,6 @@ Follow these rules strictly:
 - Do not hallucinate
 - Use only the reference material provided
 
-- If clearly unrelated to dentistry:
-  - Respond with: This is outside my scope.
-
 - Be direct and clinically accurate
 - Use simple, clear wording
 
@@ -245,6 +242,30 @@ A:
 • يتم إزالة كل جزء بحذر
 • يتم تنظيف المنطقة ويتم وضع غرز
 
+Q: my final wisdom tooth is coming in and it hurts so bad
+A: Pain with a wisdom tooth coming in is usually due to inflammation of the gum over the tooth, lack of space causing pressure, or decay if part of the tooth is exposed.
+
+Q: ضرس العقل يعورني
+A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
+
+Q: all my teeth hurt
+A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
+
+Q: أسناني كلها توجعني
+A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
+
+Q: nothing helps and all my teeth hurt
+A: Widespread pain that does not improve often points to a deeper issue like nerve inflammation where pain is felt across multiple teeth.
+
+Q: ولا شي يخفف الألم وكل أسناني تعورني
+A: إذا الألم منتشر وما يتحسن غالباً يكون بسبب مشكلة أعمق مثل التهاب في العصب ويكون الإحساس بالألم في أكثر من سن.
+
+Q: will painkillers fix the pain
+A: Painkillers reduce the pain temporarily but do not treat the underlying cause such as decay or inflammation.
+
+Q: المسكنات تعالج ألم الأسنان
+A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
+
 REFERENCE MATERIAL:
 {context}
 """
@@ -269,7 +290,10 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
         max_tokens=MAX_ANSWER_TOKENS,
     )
 
-    return (r.choices[0].message.content or "").strip()
+    answer = (r.choices[0].message.content or "").strip()
+    answer = re.sub(r"(شاش|شاشه|شاشه طبية|قطعة شاش)", "قطعة الشاش", answer)
+
+    return answer
 
 
 def generate_answer(q: str, history=None):
