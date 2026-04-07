@@ -117,7 +117,6 @@ def retrieve_chunks(query: str):
         if len(unique) >= TOP_K_FINAL:
             break
 
-    # rag visibility
     log.info(f"RAG chunks used: {[c['title'] for c in unique]}")
     log.info(f"RAG scores: {[c['score'] for c in unique]}")
 
@@ -268,16 +267,21 @@ REFERENCE MATERIAL:
 """
 
 
-def answer_from_chunks(q: str, chunks, lang: str):
+def answer_from_chunks(q: str, chunks, lang: str, history=None):
     context = "\n\n".join(c["text"] for c in chunks)
     system = build_system_prompt(context, lang)
 
+    messages = [{"role": "system", "content": system}]
+
+    if history:
+        for h in history:
+            messages.append({"role": h["role"], "content": h["content"]})
+
+    messages.append({"role": "user", "content": q})
+
     r = client.chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": q},
-        ],
+        messages=messages,
         temperature=0,
         max_tokens=MAX_ANSWER_TOKENS,
     )
@@ -285,7 +289,7 @@ def answer_from_chunks(q: str, chunks, lang: str):
     return (r.choices[0].message.content or "").strip()
 
 
-def generate_answer(q: str):
+def generate_answer(q: str, history=None):
     q = (q or "").strip()
 
     ar = is_ar(q)
@@ -299,7 +303,7 @@ def generate_answer(q: str):
     if not chunks:
         return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
 
-    answer = answer_from_chunks(q, chunks, lang)
+    answer = answer_from_chunks(q, chunks, lang, history)
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
