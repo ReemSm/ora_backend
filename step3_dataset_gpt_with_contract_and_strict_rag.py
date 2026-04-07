@@ -59,7 +59,7 @@ def rewrite_query_for_retrieval(q: str) -> str:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning."},
+                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning. Do not change to a different condition."},
                 {"role": "user", "content": q},
             ],
             temperature=0,
@@ -146,6 +146,9 @@ Follow these rules strictly:
 - Do not drift away from the question
 - Do not hallucinate
 - Use only the reference material provided
+
+- If the question is not related to oral health or dentistry:
+  - Respond with: This is outside my scope.
 
 - Be direct and clinically accurate
 - Use simple, clear wording
@@ -301,14 +304,21 @@ def generate_answer(q: str, history=None):
     chunks = retrieve_chunks(clean_query)
 
     if not chunks:
-        return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
+        return {"answer": "No relevant data found.", "refs": [], "source": "model"}
 
     answer = answer_from_chunks(q, chunks, lang, history)
+
+    context_text = " ".join(c["text"] for c in chunks).lower()
+    answer_text = answer.lower()
+
+    overlap = sum(1 for w in answer_text.split() if w in context_text)
+
+    source = "rag" if overlap > 3 else "model"
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
     return {
         "answer": answer,
         "refs": refs,
-        "source": "rag"
+        "source": source
     }
