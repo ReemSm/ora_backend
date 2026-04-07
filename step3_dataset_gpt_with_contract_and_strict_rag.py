@@ -59,7 +59,10 @@ def rewrite_query_for_retrieval(q: str) -> str:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning. Do not change to a different condition."},
+                {
+                    "role": "system",
+                    "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning. Do not change to a different condition. If the query looks like a typo of a dental term, correct it to the closest valid dental meaning."
+                },
                 {"role": "user", "content": q},
             ],
             temperature=0,
@@ -147,7 +150,7 @@ Follow these rules strictly:
 - Do not hallucinate
 - Use only the reference material provided
 
-- If the question is not related to oral health or dentistry:
+- If clearly unrelated to dentistry:
   - Respond with: This is outside my scope.
 
 - Be direct and clinically accurate
@@ -166,6 +169,7 @@ Arabic rules:
 - Use natural clinical Arabic, not formal textbook language
 - No literal translation
 - Always use: قطعة الشاش for gauze
+- Bullet points in Arabic must be right-to-left aligned
 
 Examples:
 
@@ -240,30 +244,6 @@ A:
 • قد يتم تقسيم السن إلى أجزاء لتسهيل الإزالة
 • يتم إزالة كل جزء بحذر
 • يتم تنظيف المنطقة ويتم وضع غرز
-
-Q: my final wisdom tooth is coming in and it hurts so bad
-A: Pain with a wisdom tooth coming in is usually due to inflammation of the gum over the tooth, lack of space causing pressure, or decay if part of the tooth is exposed.
-
-Q: ضرس العقل يعورني
-A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
-
-Q: all my teeth hurt
-A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
-
-Q: أسناني كلها توجعني
-A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
-
-Q: nothing helps and all my teeth hurt
-A: Widespread pain that does not improve often points to a deeper issue like nerve inflammation where pain is felt across multiple teeth.
-
-Q: ولا شي يخفف الألم وكل أسناني تعورني
-A: إذا الألم منتشر وما يتحسن غالباً يكون بسبب مشكلة أعمق مثل التهاب في العصب ويكون الإحساس بالألم في أكثر من سن.
-
-Q: will painkillers fix the pain
-A: Painkillers reduce the pain temporarily but do not treat the underlying cause such as decay or inflammation.
-
-Q: المسكنات تعالج ألم الأسنان
-A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
 
 REFERENCE MATERIAL:
 {context}
