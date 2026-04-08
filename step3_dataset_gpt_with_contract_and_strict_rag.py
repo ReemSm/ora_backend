@@ -288,6 +288,20 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
 
     return (r.choices[0].message.content or "").strip()
     
+def is_relevant(query: str, chunks: list) -> bool:
+    if not chunks:
+        return False
+
+    top_text = chunks[0]["text"].lower()
+    query = query.lower()
+
+    query_words = set(query.split())
+    chunk_words = set(top_text.split())
+
+    overlap = query_words.intersection(chunk_words)
+
+    return len(overlap) >= 2   
+    
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"INCOMING QUESTION: {q}")
