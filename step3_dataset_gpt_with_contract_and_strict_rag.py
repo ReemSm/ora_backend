@@ -291,6 +291,7 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
 
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
+    log.info(f"INCOMING QUESTION: {q}")
 
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
@@ -304,6 +305,7 @@ def generate_answer(q: str, history=None):
         return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
 
     answer = answer_from_chunks(q, chunks, lang, history)
+    log.info(f"FINAL ANSWER: {answer}")
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
