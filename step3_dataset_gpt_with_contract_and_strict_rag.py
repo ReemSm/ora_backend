@@ -288,7 +288,7 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
 
     return (r.choices[0].message.content or "").strip()
     
-    def is_relevant(query: str, chunks: list) -> bool:
+def is_relevant(query: str, chunks: list) -> bool:
         if not chunks:
             return False
 
