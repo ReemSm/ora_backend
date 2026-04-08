@@ -313,10 +313,10 @@ def generate_answer(q: str, history=None):
         "source": "empty"
     }
 
-context = "\n\n".join(c["text"] for c in chunks)
-log.info(f"FINAL ANSWER: {context}")
+   context = "\n\n".join(c["text"] for c in chunks)
+   log.info(f"FINAL ANSWER: {context}")
 
-return {
+   return {
     "answer": context,
     "refs": [c["title"] for c in chunks][:3],
     "source": "rag"
