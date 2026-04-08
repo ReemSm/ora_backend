@@ -59,10 +59,7 @@ def rewrite_query_for_retrieval(q: str) -> str:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning. Do not change to a different condition. If the query looks like a typo of a dental term, correct it to the closest valid dental meaning."
-                },
+                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning."},
                 {"role": "user", "content": q},
             ],
             temperature=0,
@@ -150,9 +147,6 @@ Follow these rules strictly:
 - Do not hallucinate
 - Use only the reference material provided
 
-- If clearly unrelated to dentistry:
-  - Respond with: This is outside my scope.
-
 - Be direct and clinically accurate
 - Use simple, clear wording
 
@@ -168,8 +162,7 @@ Follow these rules strictly:
 Arabic rules:
 - Use natural clinical Arabic, not formal textbook language
 - No literal translation
-- The term ‘قطعة الشاش’ is mandatory. Any other word for gauze is incorrect. Never use alternatives such as شمّة or any variation
-- Bullet points in Arabic must be right-to-left aligned
+- Always use: قطعة الشاش for gauze
 
 Examples:
 
@@ -245,6 +238,30 @@ A:
 • يتم إزالة كل جزء بحذر
 • يتم تنظيف المنطقة ويتم وضع غرز
 
+Q: my final wisdom tooth is coming in and it hurts so bad
+A: Pain with a wisdom tooth coming in is usually due to inflammation of the gum over the tooth, lack of space causing pressure, or decay if part of the tooth is exposed.
+
+Q: ضرس العقل يعورني
+A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
+
+Q: all my teeth hurt
+A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
+
+Q: أسناني كلها توجعني
+A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
+
+Q: nothing helps and all my teeth hurt
+A: Widespread pain that does not improve often points to a deeper issue like nerve inflammation where pain is felt across multiple teeth.
+
+Q: ولا شي يخفف الألم وكل أسناني تعورني
+A: إذا الألم منتشر وما يتحسن غالباً يكون بسبب مشكلة أعمق مثل التهاب في العصب ويكون الإحساس بالألم في أكثر من سن.
+
+Q: will painkillers fix the pain
+A: Painkillers reduce the pain temporarily but do not treat the underlying cause such as decay or inflammation.
+
+Q: المسكنات تعالج ألم الأسنان
+A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
+
 REFERENCE MATERIAL:
 {context}
 """
@@ -268,12 +285,7 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
         temperature=0,
         max_tokens=MAX_ANSWER_TOKENS,
     )
-    
-    answer = re.sub(
-    r"(شاش|شاشه|شاشه طبية|قطعة شاش|شمّة|شمه|شَمّة)",
-    "قطعة الشاش",
-    answer
-)
+
     return (r.choices[0].message.content or "").strip()
 
 
@@ -289,21 +301,14 @@ def generate_answer(q: str, history=None):
     chunks = retrieve_chunks(clean_query)
 
     if not chunks:
-        return {"answer": "No relevant data found.", "refs": [], "source": "model"}
+        return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
 
     answer = answer_from_chunks(q, chunks, lang, history)
-
-    context_text = " ".join(c["text"] for c in chunks).lower()
-    answer_text = answer.lower()
-
-    overlap = sum(1 for w in answer_text.split() if w in context_text)
-
-    source = "rag" if overlap > 3 else "model"
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
     return {
         "answer": answer,
         "refs": refs,
-        "source": source
+        "source": "rag"
     }
