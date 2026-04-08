@@ -306,20 +306,18 @@ def generate_answer(q: str, history=None):
         print("DEBUG top_score:", chunks[0]["score"])
         print("DEBUG titles:", [c["title"] for c in chunks])
     
-    if not chunks or chunks[0]["score"] < 0.8:
-        return {
-        "answer": answer_from_chunks(q, [], lang, history),
-        "refs": [],
-        "source": "model"
-    }
-    
-    answer = answer_from_chunks(q, chunks, lang, history)
-    log.info(f"FINAL ANSWER: {answer}")
-
-    refs = list({c["title"] for c in chunks if c["title"]})[:3]
-    
+   if not chunks or chunks[0]["score"] < 0.45:
     return {
-        "answer": answer,
-        "refs": refs,
-        "source": "rag"
+        "answer": "No relevant data found.",
+        "refs": [],
+        "source": "empty"
     }
+
+context = "\n\n".join(c["text"] for c in chunks)
+log.info(f"FINAL ANSWER: {context}")
+return {
+    "answer": context,
+    "refs": [c["title"] for c in chunks][:3],
+    "source": "rag"
+}
+   
