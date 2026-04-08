@@ -287,21 +287,8 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
     )
 
     return (r.choices[0].message.content or "").strip()
-    
-def is_relevant(query: str, chunks: list) -> bool:
-    if not chunks:
-        return False
 
-    top_text = chunks[0]["text"].lower()
-    query = query.lower()
 
-    query_words = set(query.split())
-    chunk_words = set(top_text.split())
-
-    overlap = query_words.intersection(chunk_words)
-
-    return len(overlap) >= 2   
-    
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"INCOMING QUESTION: {q}")
@@ -313,24 +300,26 @@ def generate_answer(q: str, history=None):
     clean_query = rewrite_query_for_retrieval(base_query)
 
     chunks = retrieve_chunks(clean_query)
-
+    
     print("DEBUG len_chunks:", len(chunks))
     if chunks:
         print("DEBUG top_score:", chunks[0]["score"])
         print("DEBUG titles:", [c["title"] for c in chunks])
-
-    if not chunks or chunks[0]["score"] < 0.45 or not is_relevant(clean_query, chunks):
+    
+    if not chunks or chunks[0]["score"] < 0.8:
         return {
-            "answer": "No relevant data found.",
-            "refs": [],
-            "source": "empty"
-        }
+        "answer": answer_from_chunks(q, [], lang, history),
+        "refs": [],
+        "source": "model"
+    }
+    
+    answer = answer_from_chunks(q, chunks, lang, history)
+    log.info(f"FINAL ANSWER: {answer}")
 
-    context = "\n\n".join(c["text"] for c in chunks)
-    log.info(f"FINAL ANSWER: {context}")
-
+    refs = list({c["title"] for c in chunks if c["title"]})[:3]
+    
     return {
-        "answer": context,
-        "refs": [c["title"] for c in chunks][:3],
+        "answer": answer,
+        "refs": refs,
         "source": "rag"
     }
