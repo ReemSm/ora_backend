@@ -59,7 +59,7 @@ def rewrite_query_for_retrieval(q: str) -> str:
         r = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning."},
+                {"role": "system", "content": "Rewrite into a clean short dental query. Fix spelling and clarity only. Preserve original intent exactly. Do not alter medical meaning. Do not change to a different condition. If the query looks like a typo of a dental term, correct it to the closest valid dental meaning."},
                 {"role": "user", "content": q},
             ],
             temperature=0,
@@ -308,7 +308,8 @@ def generate_answer(q: str, history=None):
     log.info(f"FINAL ANSWER: {answer}")
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
-
+    
+    source = "rag" if chunks else "model"
     return {
         "answer": answer,
         "refs": refs,
