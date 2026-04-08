@@ -301,15 +301,18 @@ def generate_answer(q: str, history=None):
 
     chunks = retrieve_chunks(clean_query)
 
-    if not chunks:
-        return {"answer": "No relevant data found.", "refs": [], "source": "empty"}
-
+    if not chunks or chunks[0]["score"] < 0.8:
+    return {
+        "answer": answer_from_chunks(q, [], lang, history),
+        "refs": [],
+        "source": "model"
+    }
+    
     answer = answer_from_chunks(q, chunks, lang, history)
     log.info(f"FINAL ANSWER: {answer}")
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
     
-    source = "rag" if chunks else "model"
     return {
         "answer": answer,
         "refs": refs,
