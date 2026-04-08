@@ -302,7 +302,7 @@ def generate_answer(q: str, history=None):
     chunks = retrieve_chunks(clean_query)
 
     if not chunks or chunks[0]["score"] < 0.8:
-    return {
+        return {
         "answer": answer_from_chunks(q, [], lang, history),
         "refs": [],
         "source": "model"
