@@ -287,8 +287,6 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
     )
 
     return (r.choices[0].message.content or "").strip()
-
-
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"INCOMING QUESTION: {q}")
@@ -300,25 +298,25 @@ def generate_answer(q: str, history=None):
     clean_query = rewrite_query_for_retrieval(base_query)
 
     chunks = retrieve_chunks(clean_query)
-    
+
     print("DEBUG len_chunks:", len(chunks))
     if chunks:
         print("DEBUG top_score:", chunks[0]["score"])
         print("DEBUG titles:", [c["title"] for c in chunks])
-    
+
     if not chunks or chunks[0]["score"] < 0.45:
-       return {
-        "answer": "No relevant data found.",
-        "refs": [],
-        "source": "empty"
+        return {
+            "answer": "No relevant data found.",
+            "refs": [],
+            "source": "empty"
+        }
+
+    context = "\n\n".join(c["text"] for c in chunks)
+    log.info(f"FINAL ANSWER: {context}")
+
+    return {
+        "answer": context,
+        "refs": [c["title"] for c in chunks][:3],
+        "source": "rag"
     }
-
-   context = "\n\n".join(c["text"] for c in chunks)
-   log.info(f"FINAL ANSWER: {context}")
-
-   return {
-    "answer": context,
-    "refs": [c["title"] for c in chunks][:3],
-    "source": "rag"
-}
    
