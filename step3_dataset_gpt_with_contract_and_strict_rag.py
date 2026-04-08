@@ -286,12 +286,6 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
         max_tokens=MAX_ANSWER_TOKENS,
     )
 
-    answer = re.sub(
-    r"(شاش|شاشه|شاشه طبية|قطعة شاش|شمّة|شمه|شَمّة)",
-    "قطعة الشاش",
-    answer
-)
-
     return (r.choices[0].message.content or "").strip()
 
 
