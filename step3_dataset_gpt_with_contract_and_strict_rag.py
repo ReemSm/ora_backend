@@ -300,7 +300,12 @@ def generate_answer(q: str, history=None):
     clean_query = rewrite_query_for_retrieval(base_query)
 
     chunks = retrieve_chunks(clean_query)
-
+    
+    print("DEBUG len_chunks:", len(chunks))
+    if chunks:
+        print("DEBUG top_score:", chunks[0]["score"])
+        print("DEBUG titles:", [c["title"] for c in chunks])
+    
     if not chunks or chunks[0]["score"] < 0.8:
         return {
         "answer": answer_from_chunks(q, [], lang, history),
