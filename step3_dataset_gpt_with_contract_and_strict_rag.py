@@ -162,7 +162,7 @@ Follow these rules strictly:
 Arabic rules:
 - Use natural clinical Arabic, not formal textbook language
 - No literal translation
-- Always use: قطعة الشاش for gauze
+- The term ‘قطعة الشاش’ is mandatory. Any other word for gauze is incorrect. Never use alternatives such as شمّة or any variation
 
 Examples:
 
@@ -285,6 +285,12 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
         temperature=0,
         max_tokens=MAX_ANSWER_TOKENS,
     )
+
+    answer = re.sub(
+    r"(شاش|شاشه|شاشه طبية|قطعة شاش|شمّة|شمه|شَمّة)",
+    "قطعة الشاش",
+    answer
+)
 
     return (r.choices[0].message.content or "").strip()
 
