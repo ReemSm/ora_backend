@@ -287,6 +287,22 @@ def answer_from_chunks(q: str, chunks, lang: str, history=None):
     )
 
     return (r.choices[0].message.content or "").strip()
+    
+    def is_relevant(query: str, chunks: list) -> bool:
+        if not chunks:
+            return False
+
+    top_text = chunks[0]["text"].lower()
+    query = query.lower()
+
+    # simple hard filter: at least ONE keyword overlap
+    query_words = set(query.split())
+    chunk_words = set(top_text.split())
+
+    overlap = query_words.intersection(chunk_words)
+
+    return len(overlap) >= 2
+
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"INCOMING QUESTION: {q}")
@@ -304,7 +320,7 @@ def generate_answer(q: str, history=None):
         print("DEBUG top_score:", chunks[0]["score"])
         print("DEBUG titles:", [c["title"] for c in chunks])
 
-    if not chunks or chunks[0]["score"] < 0.45:
+    if not chunks or chunks[0]["score"] < 0.45 or not is_relevant(clean_query, chuncks):
         return {
             "answer": "No relevant data found.",
             "refs": [],
