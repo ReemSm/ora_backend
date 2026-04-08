@@ -306,7 +306,7 @@ def generate_answer(q: str, history=None):
         print("DEBUG top_score:", chunks[0]["score"])
         print("DEBUG titles:", [c["title"] for c in chunks])
     
-   if not chunks or chunks[0]["score"] < 0.45:
+    if not chunks or chunks[0]["score"] < 0.45:
        return {
         "answer": "No relevant data found.",
         "refs": [],
