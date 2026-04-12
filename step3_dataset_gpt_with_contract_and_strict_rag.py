@@ -330,7 +330,7 @@ if not is_relevant(q, chunks):
     }
 
 answer = answer_from_chunks(q, chunks, lang)
-    log.info(f"ANSWER: {answer}")
+log.info(f"ANSWER: {answer}")
 
     source = detect_source(answer, chunks)
 
