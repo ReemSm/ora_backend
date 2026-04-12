@@ -288,9 +288,9 @@ def detect_source(answer: str, chunks) -> str:
 
     return "rag" if overlap > 3 else "model"
 
-def is_relevant(q: str, chunks) -> bool:
-    if not chunks:
-        return False
+    def is_relevant(q: str, chunks) -> bool:
+        if not chunks:
+         return False
 
     context = " ".join(c["text"] for c in chunks)
 
@@ -306,7 +306,7 @@ def is_relevant(q: str, chunks) -> bool:
     out = (r.choices[0].message.content or "").strip().lower()
     return out.startswith("yes")
     
-def generate_answer(q: str, history=None):
+    def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"QUESTION: {q}")
 
