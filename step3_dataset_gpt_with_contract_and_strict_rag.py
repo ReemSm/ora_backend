@@ -307,8 +307,8 @@ def detect_source(answer: str, chunks) -> str:
     return out.startswith("yes")
     
     def generate_answer(q: str, history=None):
-    q = (q or "").strip()
-    log.info(f"QUESTION: {q}")
+        q = (q or "").strip()
+        log.info(f"QUESTION: {q}")
 
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
