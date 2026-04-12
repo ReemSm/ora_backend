@@ -288,7 +288,24 @@ def detect_source(answer: str, chunks) -> str:
 
     return "rag" if overlap > 3 else "model"
 
+def is_relevant(q: str, chunks) -> bool:
+    if not chunks:
+        return False
 
+    context = " ".join(c["text"] for c in chunks)
+
+    r = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Is the reference directly relevant to the question? Answer yes or no only."},
+            {"role": "user", "content": f"Question: {q}\n\nReference:\n{context}"}
+        ],
+        temperature=0,
+    )
+
+    out = (r.choices[0].message.content or "").strip().lower()
+    return out.startswith("yes")
+    
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"QUESTION: {q}")
@@ -303,9 +320,16 @@ def generate_answer(q: str, history=None):
     else:
         clean_query = base_query
 
-    chunks = retrieve_chunks(clean_query)
+  chunks = retrieve_chunks(clean_query)
 
-    answer = answer_from_chunks(q, chunks, lang)
+if not is_relevant(q, chunks):
+    return {
+        "answer": "I can only help with oral health related questions.",
+        "refs": [],
+        "source": "model"
+    }
+
+answer = answer_from_chunks(q, chunks, lang)
     log.info(f"ANSWER: {answer}")
 
     source = detect_source(answer, chunks)
