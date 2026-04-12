@@ -67,7 +67,7 @@ def rewrite_query(q: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "Clean the query for retrieval. Fix typos and informal wording only. Do not change meaning. Do not reinterpret the condition."
+                    "content": "Clean the query for retrieval. Fix typos and informal wording only. Do not change meaning."
                 },
                 {"role": "user", "content": q},
             ],
@@ -115,148 +115,35 @@ def retrieve_chunks(query: str):
     return chunks
 
 
+def is_relevant(q: str, chunks) -> bool:
+    if not chunks:
+        return False
+
+    context = " ".join(c["text"] for c in chunks)
+
+    r = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Is the reference directly relevant to the question? Answer yes or no only."},
+            {"role": "user", "content": f"Question: {q}\n\nReference:\n{context}"}
+        ],
+        temperature=0,
+    )
+
+    out = (r.choices[0].message.content or "").strip().lower()
+    return out.startswith("yes")
+
+
 def build_system_prompt(context: str, lang: str) -> str:
     return f"""
 You are an oral health assistant.
 
 Output language: {lang}
 
-Rules:
-
-- No introductions
-- No empathy statements
-- No reassurance
-- No follow-up questions
-- No emojis
-- No dashes
-- No filler or extra commentary
-
-- Answer only what the user asked
-- Do not add information that was not requested
-- Do not drift away from the question
-- Do not hallucinate
 - Use ONLY the reference material provided
 - Do NOT use general knowledge
-
-- If context is limited:
-  - Give a safe, minimal, general answer
-  - Do NOT invent details
-
-- Be direct and clinically accurate
-- Use simple, clear wording
-
-- If instruction:
-  - Output must be bullet points using • only
-  - Each point is one clear step
-  - No text before or after bullets
-
-- If informational:
-  - Output must be plain text
-  - No bullet points
-
-Arabic rules:
-- Use natural clinical Arabic, not formal textbook language
-- No literal translation
-- Always use: قطعة شاش
-- Never use alternatives
-
-Examples:
-
-Q: my tooth hurts
-A: Common reasons for tooth pain are cavities, pulp inflammation (the nerve of the tooth), or gum inflammation. Sometimes the pain comes from another tooth or from areas like sinusitis. If it continues or gets worse, a dental checkup is recommended.
-
-Q: أسناني تعورني
-A: من الأسباب الشائعة لألم الأسنان التسوس، التهاب العصب، أو التهاب اللثة. أحياناً يكون الألم من سن آخر أو من الجيوب الأنفية. إذا استمر الألم أو زاد ننصحك بزيارة طبيب أسنان مرخص.
-
-Q: I just had a tooth extraction what should I do
-A:
-• Bite on gauze for 30 minutes after the procedure
-• Use a cold compress on the area during the first 30 minutes
-• Do not spit or move water inside your mouth for 24 hours
-• Do not use a straw for 24 hours
-• Avoid hot or hard food
-• Clean your teeth normally but avoid the procedure site
-• Follow prescribed medication if given
-• Avoid smoking and physical activity for 24 hours
-
-Q: خلعت سني وش أسوي
-A:
-• اضغط على قطعة الشاش أول 30 دقيقة بعد الإجراء
-• استخدم كمادات باردة على المنطقة خلال أول 30 دقيقة
-• لا تبصق ولا تحرك الماء داخل الفم لمدة 24 ساعة (بما في ذلك المضمضة وقت الوضوء)
-• لا تستخدم الشفاط أو المصاص لمدة 24 ساعة
-• تجنب الأكل القاسي أو الساخن
-• نظف أسنانك بشكل طبيعي مع تجنب مكان الخلع
-• التزم بالأدوية الموصوفة إذا تم وصفها
-• تجنب التدخين والجهد البدني لمدة 24 ساعة
-
-Q: I had teeth whitening what should I do after
-A:
-• Sensitivity after whitening is normal and varies from one person to another, but it is usually strongest during the first two to three days and then settles gradually
-• You can take over the counter pain relief if the sensitivity is bothering you
-• Avoid anything that can stain your teeth like coffee, tea, spices, or strongly colored food and drinks for at least two weeks
-• Avoid smoking, vaping, and tobacco for at least two weeks
-• Avoid whitening toothpaste
-• Avoid colored toothpaste and colored mouth rinses
-• Use toothpaste designed for sensitivity and you can leave it on your teeth for about a minute before brushing (follow the instructions provided by the toothpaste company)
-• Use floss to keep areas between teeth clean and reduce staining
-• Fluoridated mouth rinses can help as long as they are not colored
-
-Q: سويت تبييض وش أسوي بعد
-A:
-• الحساسية بعد التبييض طبيعية وتختلف من شخص لآخر وخاصة خلال أول يومين إلى ثلاثة وتخف تدريجياً بعد ذلك
-• يمكن استخدام مسكنات مثل البنادول أو الباراسيتامول إذا كانت الحساسية مزعجة خاصة خلال الأيام الأولى
-• تجنب الأطعمة والمشروبات المسببة للتصبغات مثل القهوة والشاي أو البهارات الملونة لمدة أسبوعين على الأقل
-• تجنب التدخين أو الفيب أو أي منتجات تبغ لمدة أسبوعين على الأقل
-• تجنب معاجين التبييض
-• تجنب معاجين الأسنان أو غسولات الفم الملونة
-• استخدم معجون مخصص للحساسية ويمكن تركه على الأسنان لمدة دقيقة قبل التفريش (اتبع تعليمات الشركة المصنعة)
-• استخدام الخيط يساعد في تنظيف المناطق بين الأسنان ويقلل من حدوث تصبغات بينها
-• يمكن استخدام غسول يحتوي على الفلورايد وقد يساعد في تخفيف حساسية الأسنان بشرط أن يكون غير ملون
-
-Q: how does surgical extraction work
-A:
-• Clinical and radiographic assessment, usually with 3D imaging, is done first
-• Local anesthesia is given and the area is fully numbed
-• A small incision is made to access the tooth
-• A small amount of bone may be removed if needed
-• The tooth may be divided into sections
-• Each part is removed carefully
-• The area is cleaned and sutures are placed
-
-Q: كيف يتم الخلع الجراحي
-A:
-• يتم تقييم الحالة سريرياً وبالأشعة وغالباً باستخدام أشعة ثلاثية الأبعاد
-• يتم إعطاء تخدير موضعي حتى يتم التخدير الكامل
-• يتم عمل فتحة بسيطة للوصول إلى السن
-• قد يتم إزالة جزء بسيط من العظم إذا لزم
-• قد يتم تقسيم السن إلى أجزاء لتسهيل الإزالة
-• يتم إزالة كل جزء بحذر
-• يتم تنظيف المنطقة ويتم وضع غرز
-
-Q: my final wisdom tooth is coming in and it hurts so bad
-A: Pain with a wisdom tooth coming in is usually due to inflammation of the gum over the tooth, lack of space causing pressure, or decay if part of the tooth is exposed.
-
-Q: ضرس العقل يعورني
-A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
-
-Q: all my teeth hurt
-A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
-
-Q: أسناني كلها توجعني
-A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
-
-Q: nothing helps and all my teeth hurt
-A: Widespread pain that does not improve often points to a deeper issue like nerve inflammation where pain is felt across multiple teeth.
-
-Q: ولا شي يخفف الألم وكل أسناني تعورني
-A: إذا الألم منتشر وما يتحسن غالباً يكون بسبب مشكلة أعمق مثل التهاب في العصب ويكون الإحساس بالألم في أكثر من سن.
-
-Q: will painkillers fix the pain
-A: Painkillers reduce the pain temporarily but do not treat the underlying cause such as decay or inflammation.
-
-Q: المسكنات تعالج ألم الأسنان
-A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
+- Do not hallucinate
+- Answer only what was asked
 
 REFERENCE MATERIAL:
 {context}
@@ -288,27 +175,10 @@ def detect_source(answer: str, chunks) -> str:
 
     return "rag" if overlap > 3 else "model"
 
-    def is_relevant(q: str, chunks) -> bool:
-        if not chunks:
-         return False
 
-    context = " ".join(c["text"] for c in chunks)
-
-    r = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "Is the reference directly relevant to the question? Answer yes or no only."},
-            {"role": "user", "content": f"Question: {q}\n\nReference:\n{context}"}
-        ],
-        temperature=0,
-    )
-
-    out = (r.choices[0].message.content or "").strip().lower()
-    return out.startswith("yes")
-    
-    def generate_answer(q: str, history=None):
-        q = (q or "").strip()
-        log.info(f"QUESTION: {q}")
+def generate_answer(q: str, history=None):
+    q = (q or "").strip()
+    log.info(f"QUESTION: {q}")
 
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
@@ -320,23 +190,23 @@ def detect_source(answer: str, chunks) -> str:
     else:
         clean_query = base_query
 
-        chunks = retrieve_chunks(clean_query)
+    chunks = retrieve_chunks(clean_query)
 
-if not is_relevant(q, chunks):
+    if not is_relevant(q, chunks):
+        return {
+            "answer": "I can only help with oral health related questions.",
+            "refs": [],
+            "source": "model"
+        }
+
+    answer = answer_from_chunks(q, chunks, lang)
+    log.info(f"ANSWER: {answer}")
+
+    source = detect_source(answer, chunks)
+
+    refs = list({c["title"] for c in chunks if c["title"]})[:3]
+
     return {
-        "answer": "I can only help with oral health related questions.",
-        "refs": [],
-        "source": "model"
-    }
-
-answer = answer_from_chunks(q, chunks, lang)
-log.info(f"ANSWER: {answer}")
-
-source = detect_source(answer, chunks)
-
-refs = list({c["title"] for c in chunks if c["title"]})[:3]
-
-return {
         "answer": answer,
         "refs": refs,
         "source": source
