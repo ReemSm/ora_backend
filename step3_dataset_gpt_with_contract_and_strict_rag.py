@@ -133,7 +133,7 @@ def is_relevant(q: str, chunks) -> bool:
             messages=[
                 {
                     "role": "system",
-                    "content": "Is this reference directly relevant to answering this exact oral health question? Answer only yes or no. Say no for greetings or non-oral-health topics."
+                    "content": "Is this reference directly relevant to answering this exact oral health question? Answer only yes or no. Say no for greetings or non-oral-health topics. If uncertain, answer yes."
                 },
                 {
                     "role": "user",
