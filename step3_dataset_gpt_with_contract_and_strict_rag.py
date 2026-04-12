@@ -332,11 +332,11 @@ if not is_relevant(q, chunks):
 answer = answer_from_chunks(q, chunks, lang)
 log.info(f"ANSWER: {answer}")
 
-    source = detect_source(answer, chunks)
+source = detect_source(answer, chunks)
 
-    refs = list({c["title"] for c in chunks if c["title"]})[:3]
+refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
-    return {
+return {
         "answer": answer,
         "refs": refs,
         "source": source
