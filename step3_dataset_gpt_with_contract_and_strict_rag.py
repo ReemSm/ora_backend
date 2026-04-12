@@ -320,7 +320,7 @@ def detect_source(answer: str, chunks) -> str:
     else:
         clean_query = base_query
 
-  chunks = retrieve_chunks(clean_query)
+        chunks = retrieve_chunks(clean_query)
 
 if not is_relevant(q, chunks):
     return {
