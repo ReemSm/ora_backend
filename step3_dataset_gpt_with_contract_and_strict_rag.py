@@ -289,7 +289,7 @@ def detect_source(answer: str, chunks) -> str:
     return "rag" if overlap > 3 else "model"
 
 
-def generate_answer(q: str):
+def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"QUESTION: {q}")
 
