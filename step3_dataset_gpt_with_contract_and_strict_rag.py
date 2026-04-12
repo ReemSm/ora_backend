@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 from openai import OpenAI
 from pinecone import Pinecone
@@ -25,12 +25,18 @@ index = pc.Index(PINECONE_INDEX)
 
 ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
 
+GREETINGS = {"hi", "hello", "hey", "مرحبا", "هلا", "السلام", "السلام عليكم"}
+
 _query_cache = {}
 _embedding_cache = {}
 
 
 def is_ar(text: str) -> bool:
     return bool(ARABIC_RE.search(text or ""))
+
+
+def is_greeting(q: str) -> bool:
+    return q.strip().lower() in GREETINGS
 
 
 def translate_to_english(q: str) -> str:
@@ -67,7 +73,7 @@ def rewrite_query(q: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "Clean the query for retrieval. Fix typos and informal wording only. Do not change meaning."
+                    "content": "Clean the query for retrieval. Fix typos and informal wording only. Do not change meaning. Do not reinterpret the condition."
                 },
                 {"role": "user", "content": q},
             ],
@@ -121,17 +127,25 @@ def is_relevant(q: str, chunks) -> bool:
 
     context = " ".join(c["text"] for c in chunks)
 
-    r = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "Is the reference directly relevant to the question? Answer yes or no only."},
-            {"role": "user", "content": f"Question: {q}\n\nReference:\n{context}"}
-        ],
-        temperature=0,
-    )
-
-    out = (r.choices[0].message.content or "").strip().lower()
-    return out.startswith("yes")
+    try:
+        r = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Is this reference directly relevant to answering this exact oral health question? Answer only yes or no. Say no for greetings or non-oral-health topics."
+                },
+                {
+                    "role": "user",
+                    "content": f"Question: {q}\n\nReference:\n{context}",
+                },
+            ],
+            temperature=0,
+        )
+        out = (r.choices[0].message.content or "").strip().lower()
+        return out.startswith("yes")
+    except:
+        return False
 
 
 def build_system_prompt(context: str, lang: str) -> str:
@@ -144,6 +158,7 @@ Output language: {lang}
 - Do NOT use general knowledge
 - Do not hallucinate
 - Answer only what was asked
+- When the user's intent clearly matches an example, follow the example style and content closely
 
 REFERENCE MATERIAL:
 {context}
@@ -167,21 +182,20 @@ def answer_from_chunks(q: str, chunks, lang: str):
     return (r.choices[0].message.content or "").strip()
 
 
-def detect_source(answer: str, chunks) -> str:
-    context_text = " ".join(c["text"] for c in chunks).lower()
-    answer_text = answer.lower()
-
-    overlap = sum(1 for w in answer_text.split() if w in context_text)
-
-    return "rag" if overlap > 3 else "model"
-
-
 def generate_answer(q: str, history=None):
     q = (q or "").strip()
     log.info(f"QUESTION: {q}")
 
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
+
+    # greeting bypass
+    if is_greeting(q):
+        return {
+            "answer": "كيف أقدر أساعدك؟" if ar else "How can I help you?",
+            "refs": [],
+            "source": "model"
+        }
 
     base_query = translate_to_english(q) if ar else q
 
@@ -194,7 +208,7 @@ def generate_answer(q: str, history=None):
 
     if not is_relevant(q, chunks):
         return {
-            "answer": "I can only help with oral health related questions.",
+            "answer": "أقدر أساعد فقط في أسئلة صحة الفم والأسنان" if ar else "I can only help with oral health related questions.",
             "refs": [],
             "source": "model"
         }
@@ -202,12 +216,10 @@ def generate_answer(q: str, history=None):
     answer = answer_from_chunks(q, chunks, lang)
     log.info(f"ANSWER: {answer}")
 
-    source = detect_source(answer, chunks)
-
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
 
     return {
         "answer": answer,
         "refs": refs,
-        "source": source
+        "source": "rag"
     }
