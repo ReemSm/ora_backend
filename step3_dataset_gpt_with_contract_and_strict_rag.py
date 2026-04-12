@@ -156,6 +156,8 @@ Output language: {lang}
 
 - Do not hallucinate
 - Answer only what was asked
+- Always use "lost vitality" instead of "nerve died"
+- استخدم "فقد حيويته" ولا تستخدم "مات"
 
 Answering behavior (strict):
 
