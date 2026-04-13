@@ -17,9 +17,7 @@ MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
 REQUEST_TIMEOUT_SECONDS = 15
 
-ALLOWED_ORIGINS = [
-    "https://ora-app.base44.app",
-]
+ALLOWED_ORIGINS = ["*"]
 
 executor = ThreadPoolExecutor(max_workers=10)
 
