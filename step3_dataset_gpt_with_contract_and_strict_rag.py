@@ -137,7 +137,7 @@ def is_relevant(q: str, chunks) -> bool:
                 },
                 {
                     "role": "user",
-                    "content": f"Question: {q}\n\nReference:\n{context}",
+                    "content": f"Question: {q}",
                 },
             ],
             temperature=0,
