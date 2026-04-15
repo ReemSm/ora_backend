@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import time
@@ -5,10 +6,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
-from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, field_validator
 
 import step3_dataset_gpt_with_contract_and_strict_rag as rag
@@ -17,21 +16,9 @@ import step3_dataset_gpt_with_contract_and_strict_rag as rag
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 60
+REQUEST_TIMEOUT_SECONDS = 15
 
-# ── Explicitly list every origin allowed to call this API ──────────────────
-# Do NOT use ["*"] in production — wildcard prevents browsers from sending
-# credentials and causes subtle failures. Add your deployed frontend URL here
-# when you go live, e.g. "https://your-frontend.netlify.app"
-ALLOWED_ORIGINS = [
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-    "http://localhost:3000",       # common React dev server port
-    "http://127.0.0.1:3000",
-    "http://localhost:5500",       # VS Code Live Server
-    "http://127.0.0.1:5500",
-    # "https://your-production-domain.com",  ← uncomment & fill when deploying
-]
+ALLOWED_ORIGINS = ["*"]
 
 executor = ThreadPoolExecutor(max_workers=10)
 
@@ -39,80 +26,16 @@ logging.basicConfig(level=logging.INFO, format="[API %(levelname)s] %(message)s"
 log = logging.getLogger("api")
 
 
-class NullOriginMiddleware:
-    """
-    Pure ASGI middleware that handles CORS for null origins (sandboxed iframes,
-    file:// pages). CORSMiddleware with a specific allow_origins list will not
-    match 'null', so this middleware intercepts those requests first and
-    explicitly echoes 'null' back as the allowed origin.
-
-    It is added AFTER CORSMiddleware via add_middleware(), but because Starlette
-    reverses the middleware stack at startup, this runs FIRST (outermost layer).
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        headers = dict(scope["headers"])
-        origin = headers.get(b"origin", b"").decode()
-
-        # Only intercept null origins — everything else goes to CORSMiddleware
-        if origin != "null":
-            await self.app(scope, receive, send)
-            return
-
-        method = scope.get("method", "")
-
-        # Handle preflight OPTIONS request for null origin
-        if method == "OPTIONS":
-            response = Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": "null",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                    "Access-Control-Max-Age": "600",
-                },
-            )
-            await response(scope, receive, send)
-            return
-
-        # For actual POST/GET requests with null origin, inject the CORS header
-        # directly into the response start message before it reaches the browser
-        async def send_with_null_cors(message):
-            if message["type"] == "http.response.start":
-                mutable = MutableHeaders(scope=message)
-                mutable["Access-Control-Allow-Origin"] = "null"
-            await send(message)
-
-        await self.app(scope, receive, send_with_null_cors)
-
-
 app = FastAPI(title="ORA Backend")
 
-# ── Handles all real (non-null) origins ────────────────────────────────────
-# allow_credentials=True lets the browser send cookies/auth headers in the
-# future when you add authentication — it requires explicit origins (not "*")
-# which is exactly why we list them above instead of using a wildcard.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Added AFTER CORSMiddleware — Starlette reverses the stack so this
-# becomes the outermost middleware and executes first on every request
-app.add_middleware(NullOriginMiddleware)
-
-
-# ── Request / Response models ──────────────────────────────────────────────
 
 class HistoryTurn(BaseModel):
     role: Literal["user", "assistant"]
@@ -152,8 +75,6 @@ class AskResponse(BaseModel):
     latency_ms: float
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
 def normalize_history(history: List[HistoryTurn] | None) -> List[dict]:
     if not history:
         return []
@@ -168,8 +89,6 @@ async def run_generate_answer(query: str, history: List[dict]) -> dict:
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
-
-# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
@@ -202,7 +121,7 @@ async def ask(req: AskRequest, request: Request):
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         log.error(f"[{request_id}] timeout latency_ms={latency_ms}")
         return AskResponse(
-            answer="Request timed out. The server may be waking up — please try again.",
+            answer="Request timed out.",
             references=[],
             source="timeout",
             request_id=request_id,
