@@ -142,7 +142,16 @@ def is_relevant(q: str, chunks) -> bool:
             ],
             temperature=0,
         )
-        out = (r.choices[0].message.content or "").strip().lower()
-        return out.startswith("yes")
-    except:
-        return False
+
+        if not r or not r.choices:
+            return True
+
+        content = r.choices[0].message.content
+        if not content:
+            return True
+
+        return content.strip().lower().startswith("yes")
+
+    except Exception as e:
+        log.error(f"RELEVANCE ERROR: {e}")
+        return True
