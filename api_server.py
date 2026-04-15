@@ -5,7 +5,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
@@ -89,9 +89,12 @@ async def run_generate_answer(query: str, history: List[dict]) -> dict:
     )
 
 
-@app.options("/ask")
-async def options_ask():
-    return {"ok": True}
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str, response: Response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return Response(status_code=200)
 
 
 @app.post("/ask", response_model=AskResponse)
