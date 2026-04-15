@@ -7,6 +7,8 @@ from typing import List, Optional, Literal
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.datastructures import MutableHeaders
 from pydantic import BaseModel, field_validator
 
 import step3_dataset_gpt_with_contract_and_strict_rag as rag
@@ -15,7 +17,7 @@ import step3_dataset_gpt_with_contract_and_strict_rag as rag
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 60  # increased from 15 to survive Render cold starts
+REQUEST_TIMEOUT_SECONDS = 60
 
 ALLOWED_ORIGINS = ["*"]
 
@@ -25,8 +27,64 @@ logging.basicConfig(level=logging.INFO, format="[API %(levelname)s] %(message)s"
 log = logging.getLogger("api")
 
 
+class NullOriginMiddleware:
+    """
+    Pure ASGI middleware that handles CORS for null origins (sandboxed iframes,
+    file:// pages). CORSMiddleware with allow_origins=["*"] returns
+    Access-Control-Allow-Origin: * which browsers refuse for null origins.
+    This middleware intercepts those requests first and explicitly echoes
+    'null' back as the allowed origin.
+
+    It is added AFTER CORSMiddleware via add_middleware(), but because Starlette
+    reverses the middleware stack at startup, this runs FIRST (outermost layer).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope["headers"])
+        origin = headers.get(b"origin", b"").decode()
+
+        # Only intercept null origins — everything else goes straight to CORSMiddleware
+        if origin != "null":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+
+        # Handle preflight OPTIONS request
+        if method == "OPTIONS":
+            response = Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": "null",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        # For actual POST/GET requests, inject the CORS header directly
+        # into the response start message before it reaches the browser
+        async def send_with_null_cors(message):
+            if message["type"] == "http.response.start":
+                mutable = MutableHeaders(scope=message)
+                mutable["Access-Control-Allow-Origin"] = "null"
+            await send(message)
+
+        await self.app(scope, receive, send_with_null_cors)
+
+
 app = FastAPI(title="ORA Backend")
 
+# Handles all non-null origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -35,35 +93,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Sandboxed iframes (and local file:// pages) send Origin: null.
-# Browsers will not accept Access-Control-Allow-Origin: * for a null origin,
-# so we intercept these requests and explicitly echo "null" back as the allowed origin.
-@app.middleware("http")
-async def handle_null_origin(request: Request, call_next):
-    origin = request.headers.get("origin", "")
-
-    # Short-circuit preflight from null origin before CORSMiddleware sees it
-    if origin == "null" and request.method == "OPTIONS":
-        return Response(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin": "null",
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-                "Access-Control-Max-Age": "600",
-            },
-        )
-
-    response = await call_next(request)
-
-    # Override the ACAO header on actual requests from null origin
-    if origin == "null":
-        response.headers["Access-Control-Allow-Origin"] = "null"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-
-    return response
+# Added AFTER CORSMiddleware — Starlette reverses the stack so this
+# becomes the outermost middleware and executes first on every request
+app.add_middleware(NullOriginMiddleware)
 
 
 class HistoryTurn(BaseModel):
@@ -150,7 +182,7 @@ async def ask(req: AskRequest, request: Request):
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         log.error(f"[{request_id}] timeout latency_ms={latency_ms}")
         return AskResponse(
-            answer="Request timed out.",
+            answer="Request timed out. The server may be waking up — please try again.",
             references=[],
             source="timeout",
             request_id=request_id,
