@@ -89,6 +89,11 @@ async def run_generate_answer(query: str, history: List[dict]) -> dict:
     )
 
 
+@app.options("/ask")
+async def options_ask():
+    return {"ok": True}
+
+
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
     request_id = str(uuid.uuid4())
