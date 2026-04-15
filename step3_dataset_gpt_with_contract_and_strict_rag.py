@@ -125,7 +125,7 @@ def is_relevant(q: str, chunks) -> bool:
     if not chunks:
         return False
 
-    context = " ".join(c["text"] for c in chunks)
+    context = " ".join(c.get("text", "") for c in chunks)
 
     try:
         r = client.chat.completions.create(
