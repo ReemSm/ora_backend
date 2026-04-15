@@ -15,7 +15,7 @@ import step3_dataset_gpt_with_contract_and_strict_rag as rag
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 15
+REQUEST_TIMEOUT_SECONDS = 60  # increased from 15 to survive Render cold starts
 
 ALLOWED_ORIGINS = ["*"]
 
@@ -34,6 +34,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Sandboxed iframes (and local file:// pages) send Origin: null.
+# Browsers will not accept Access-Control-Allow-Origin: * for a null origin,
+# so we intercept these requests and explicitly echo "null" back as the allowed origin.
+@app.middleware("http")
+async def handle_null_origin(request: Request, call_next):
+    origin = request.headers.get("origin", "")
+
+    # Short-circuit preflight from null origin before CORSMiddleware sees it
+    if origin == "null" and request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "null",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "600",
+            },
+        )
+
+    response = await call_next(request)
+
+    # Override the ACAO header on actual requests from null origin
+    if origin == "null":
+        response.headers["Access-Control-Allow-Origin"] = "null"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+
+    return response
 
 
 class HistoryTurn(BaseModel):
@@ -87,14 +117,6 @@ async def run_generate_answer(query: str, history: List[dict]) -> dict:
         loop.run_in_executor(executor, rag.generate_answer, query, history),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
-
-
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str, response: Response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return Response(status_code=200)
 
 
 @app.post("/ask", response_model=AskResponse)
