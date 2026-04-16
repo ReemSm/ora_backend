@@ -546,8 +546,6 @@ A: Tooth pain is usually caused by decay, nerve inflammation, or gum inflammatio
 Q: أسناني تعورني
 A: ألم الأسنان غالباً يكون بسبب تسوس أو التهاب في العصب أو التهاب في اللثة. أحياناً يكون من سن ثاني أو من الجيوب الأنفية. تحديد السبب يعتمد على طبيعة الألم ومتى يظهر. إذا استمر أو زاد ننصحك بزيارة طبيب أسنان.
 
-⸻
-
 Q: I just had a tooth extraction what should I do
 A:
 • Bite on gauze for 30 minutes
