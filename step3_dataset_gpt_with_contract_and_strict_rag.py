@@ -544,7 +544,7 @@ Q: my tooth hurts
 A: Tooth pain is usually caused by decay, nerve inflammation, or gum inflammation. Sometimes it comes from another tooth or the sinuses. The exact cause depends on the specific characteristics of the pain you are experiencing and when it happens. If it continues or gets worse, a dental checkup is recommended.
 
 Q: أسناني تعورني
-A: ألم الأسنان غالباً يكون بسبب تسوس، التهاب في العصب، أو التهاب في اللثة. أحياناً يكون من سن ثاني أو من الجيوب الأنفية. تحديد السبب يعتمد على طبيعة الألم ومتى يظهر. إذا استمر أو زاد ننصحك بزيارة طبيب أسنان.
+A: ألم الأسنان غالباً يكون بسبب تسوس، التهاب في العصب أو التهاب في اللثة. أحياناً يكون من سن ثاني أو من الجيوب الأنفية. تحديد السبب يعتمد على طبيعة الألم ومتى يظهر. إذا استمر أو زاد ننصحك بزيارة طبيب أسنان.
 
 ⸻
 
