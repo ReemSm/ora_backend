@@ -10,6 +10,7 @@ logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s"
 log = logging.getLogger("ora")
 
 MODEL = "gpt-4o"
+FAST_MODEL = "gpt-4o-mini"          # Fix 5: used for all intermediate steps
 EMBED_MODEL = "text-embedding-3-large"
 PINECONE_INDEX = "oraapp777"
 
@@ -42,15 +43,17 @@ def is_greeting(q: str) -> bool:
 def translate_to_english(q: str) -> str:
     try:
         r = client.chat.completions.create(
-            model=MODEL,
+            model=FAST_MODEL,               # Fix 5: was MODEL
             messages=[
                 {"role": "system", "content": "Translate to clear English for dental retrieval. Output only translation."},
                 {"role": "user", "content": q},
             ],
             temperature=0,
+            max_tokens=200,                 # Fix 4: cap intermediate tokens
         )
         return (r.choices[0].message.content or "").strip() or q
-    except:
+    except Exception as e:                  # Fix 6: was bare except
+        log.warning(f"translate_to_english failed: {e}")
         return q
 
 
@@ -69,7 +72,7 @@ def rewrite_query(q: str) -> str:
 
     try:
         r = client.chat.completions.create(
-            model=MODEL,
+            model=FAST_MODEL,               # Fix 5: was MODEL
             messages=[
                 {
                     "role": "system",
@@ -78,11 +81,13 @@ def rewrite_query(q: str) -> str:
                 {"role": "user", "content": q},
             ],
             temperature=0,
+            max_tokens=150,                 # Fix 4: cap intermediate tokens
         )
         out = (r.choices[0].message.content or "").strip() or q
         _query_cache[q] = out
         return out
-    except:
+    except Exception as e:                  # Fix 6: was bare except
+        log.warning(f"rewrite_query failed: {e}")
         return q
 
 
@@ -103,7 +108,8 @@ def retrieve_chunks(query: str):
     try:
         res = index.query(vector=embed(query), top_k=TOP_K, include_metadata=True)
         matches = res.get("matches", [])
-    except:
+    except Exception as e:                  # Fix 6: was bare except
+        log.warning(f"retrieve_chunks failed: {e}")
         return []
 
     chunks = []
@@ -125,27 +131,379 @@ def is_relevant(q: str, chunks) -> bool:
     if not chunks:
         return False
 
-    context = " ".join(c["text"] for c in chunks)
+    # Fix 2: actually pass the context into the prompt (was built but never sent)
+    context = "\n\n".join(c["text"] for c in chunks[:4])
 
     try:
         r = client.chat.completions.create(
-            model=MODEL,
+            model=FAST_MODEL,               # Fix 5: was MODEL
             messages=[
                 {
-                    "role": "system", "content": "Is this question about oral or dental health? If clearly yes, answer yes. If clearly unrelated, answer no. If uncertain, answer yes."
+                    "role": "system",
+                    "content": (
+                        "You are a relevance checker for a dental health assistant. "
+                        "Given a question and retrieved reference material, decide if the "
+                        "reference contains information useful for answering the question. "
+                        "Answer only yes or no. Say no for greetings or clearly non-dental topics. "
+                        "If uncertain, answer yes."
+                    ),
                 },
                 {
-    
                     "role": "user",
-                    "content": f"Question: {q}",
+                    # Fix 2: include the context so the model can actually compare
+                    "content": f"Question: {q}\n\nReference material:\n{context}",
                 },
             ],
             temperature=0,
+            max_tokens=5,                   # Fix 4: only needs "yes" or "no"
         )
         out = (r.choices[0].message.content or "").strip().lower()
         return out.startswith("yes")
-    except:
+    except Exception as e:                  # Fix 6: was bare except returning False
+        log.warning(f"is_relevant failed: {e}")
+        return True                         # Fix 2: fail open — never block on an error
+
+
+def build_system_prompt(context: str, lang: str) -> str:
+    return f"""
+You are an oral health assistant.
+
+Output language: {lang}
+
+- Do not hallucinate
+- Answer only what was asked
+- Always use "lost vitality" instead of "nerve died"
+- استخدم "فقد حيويته" ولا تستخدم "مات"
+
+Answering behavior (strict):
+
+1. If the user question matches or is clearly similar to any example, you MUST use that example answer. Do not rewrite it. Do not expand it. Do not shorten it.
+
+2. If the question is a paraphrase of an example, map it to the closest example and return the same answer.
+
+3. If no example matches, generate the answer using ONLY the reference material, but the style, tone, structure, and wording MUST match the examples exactly.
+
+4. The examples define:
+- tone
+- length
+- structure
+- wording style
+
+You MUST follow them. Do not default to textbook or formal language.
+
+5. Do NOT invent new styles, formats, or tones.
+
+6. Do NOT add explanations, introductions, or extra details beyond what is needed, exactly like the examples.
+
+7. If the reference material does not contain the answer, do NOT answer.
+
+8. Consistency is required. The same question must always produce the same style and level of detail as the examples.
+Q: my tooth hurts
+A: Tooth pain is usually caused by decay, nerve inflammation, or gum inflammation. Sometimes it comes from another tooth or the sinuses. The exact cause depends on the specific characteristics of the pain you are experiencing and when it happens. If it continues or gets worse, a dental checkup is recommended.
+
+Q: أسناني تعورني
+A: ألم الأسنان غالباً يكون بسبب تسوس، التهاب في العصب، أو التهاب في اللثة. أحياناً يكون من سن ثاني أو من الجيوب الأنفية. تحديد السبب يعتمد على طبيعة الألم ومتى يظهر. إذا استمر أو زاد ننصحك بزيارة طبيب أسنان.
+
+⸻
+
+Q: I just had a tooth extraction what should I do
+A:
+• Bite on gauze for 30 minutes
+• Use a cold compress during the first 30 minutes
+• Do not spit or rinse for 24 hours
+• Do not use a straw for 24 hours
+• Avoid hot or hard food
+• Brush normally but avoid the extraction site
+• Take medications if prescribed
+• Avoid smoking and physical activity for 24 hours
+
+Q: خلعت سني وش أسوي
+A:
+• اضغط على قطعة شاش لمدة 30 دقيقة
+• استخدم كمادات باردة خلال أول 30 دقيقة
+• لا تبصق ولا تتمضمض لمدة 24 ساعة
+• لا تستخدم الشفاط لمدة 24 ساعة
+• تجنب الأكل القاسي أو الحار
+• نظف أسنانك بشكل طبيعي مع تجنب مكان الخلع
+• التزم بالأدوية إذا تم وصفها
+• تجنب التدخين والجهد لمدة 24 ساعة
+
+⸻
+
+Q: I had teeth whitening what should I do after
+A:
+• Sensitivity after whitening is normal, especially in the first 2–3 days
+• You can use pain relief if needed
+• Avoid staining food and drinks like coffee and tea for 2 weeks
+• Avoid smoking or vaping for 2 weeks
+• Do not use whitening toothpaste
+• Avoid colored toothpaste and mouthwash
+• Use toothpaste for sensitivity and leave it on for a minute before brushing
+• Use floss to reduce staining between teeth
+• Use a non-colored fluoride mouthwash if needed
+
+Q: سويت تبييض وش أسوي بعد
+A:
+• الحساسية بعد التبييض طبيعية خاصة أول يومين إلى ثلاثة
+• ممكن تستخدم مسكن إذا كانت مزعجة
+• تجنب القهوة والشاي والأشياء اللي تصبغ لمدة أسبوعين
+• تجنب التدخين أو الفيب لمدة أسبوعين
+• لا تستخدم معجون تبييض
+• تجنب المعاجين أو الغسولات الملونة
+• استخدم معجون للحساسية واتركه دقيقة قبل التفريش
+• استخدام الخيط يساعد يقلل التصبغات
+• ممكن تستخدم غسول فلورايد غير ملون
+
+⸻
+
+Q: how does surgical extraction work
+A:
+• The tooth is evaluated with examination and imaging
+• Local anesthesia is given
+• A small opening is made to reach the tooth
+• Bone may be removed if needed
+• The tooth may be divided into parts
+• Each part is removed carefully
+• The area is cleaned and closed
+
+Q: كيف يتم الخلع الجراحي
+A:
+• يتم تقييم الحالة بالفحص والأشعة
+• يتم إعطاء تخدير موضعي
+• يتم عمل فتحة بسيطة للوصول للسن
+• قد يتم إزالة جزء بسيط من العظم
+• قد يتم تقسيم السن لتسهيل الإزالة
+• يتم إزالة الأجزاء بحذر
+• يتم تنظيف المنطقة وإغلاقها
+
+⸻
+
+Q: my tooth hurts with sweets
+A: Pain with sweets usually means early decay or exposed dentin. It improves once the tooth is treated. These cases are usually managed with simple restorations. The earlier it is treated, the easier and simpler the treatment is, and it helps prevent progression to the nerve which increases complexity and cost.
+
+Q: سني يوجعني مع الحلا
+A: الألم مع الحلا غالباً يدل على بداية تسوس أو انكشاف طبقة من السن. يتحسن بعد العلاج، وغالباً يكون بحشوة بسيطة. كل ما كان العلاج مبكر يكون أسهل وأبسط ويمنع وصول المشكلة للعصب وزيادة التعقيد والتكلفة.
+
+⸻
+
+Q: my tooth hurts with hot and cold
+A: Pain with both hot and cold usually suggests nerve involvement rather than simple sensitivity.
+
+Q: سني يوجعني مع الحار والبارد
+A: الألم مع الحار والبارد غالباً يدل على تأثر العصب وليس مجرد حساسية بسيطة.
+
+⸻
+
+Q: should I remove my wisdom tooth
+A: Wisdom teeth are removed if they cause pain, infection, or do not have enough space. They may also be removed as part of an orthodontic treatment plan. However, if they are healthy, stable, and not causing discomfort such as headaches or jaw pain, they can be left.
+
+Q: اخلع ضرس العقل ولا لا
+A: ينخلع ضرس العقل إذا سبب ألم أو التهاب أو ما كان فيه مساحة كافية. أحياناً يكون جزء من الخطة العلاجية قبل التقويم. إذا كان سليم وما يسبب أي ألم أو مشاكل في الفك أو إزعاج مثل الصداع، ممكن يترك.
+
+⸻
+
+Q: my doctor made my crown bigger to close the space and now I feel uncomfortable
+A: Sometimes the crown is made slightly larger to close the space between teeth (interproximal space) and reduce food trapping. If it feels uncomfortable, it may need adjustment. Another option is closing the space with orthodontic treatment. Keeping the area clean with proper flossing is important to prevent gum irritation.
+
+Q: الدكتور كبر التلبيسة عشان يقفل الفراغ وأنا متضايق
+A: أحياناً يتم تكبير التلبيسة لإغلاق الفراغ بين الأسنان بهدف تقليل دخول الأكل بينها. إذا كانت غير مريحة، ممكن تحتاج تعديل. خيار آخر هو إغلاق الفراغ بالتقويم بعد تعديل التلبيسة لحجم مناسب لحجم السن الطبيعي. ومهم جداً تنظيف المنطقة جيداً باستخدام الخيط السني لتجنب التهاب اللثة.
+
+⸻
+
+Q: my child has swelling and pain is it serious
+A: Swelling with dental pain usually indicates an infection that has reached the nerve. It is not dangerous, but it should not be ignored and needs early treatment to prevent it from worsening or spreading to surrounding tissues.
+
+Q: طفل عنده انتفاخ وألم هل هو خطير
+A: الانتفاخ مع الألم غالباً يدل على وجود التهاب وصل للعصب. هو غير خطير لكن ما يتجاهل ويحتاج علاج مبكر عشان ما يزيد أو يمتد للأنسجة المحيطة.
+
+⸻
+
+Q: can we extract a tooth while there is swelling
+A: It depends on the case. If the swelling is localized, the tooth can often be treated with either extraction or root canal treatment depending on the clinical decision. However, if the swelling is severe, treatment may be delayed until it is controlled with antibiotics, and sometimes incision and drainage may be needed. Severe swelling can reduce anesthesia effectiveness and limit mouth opening, making treatment more difficult. If antibiotics are used to control the swelling, the root cause must still be treated to prevent it from returning even if symptoms improve.
+
+Q: نقدر نخلع السن وهو فيه انتفاخ
+A: يعتمد على الحالة. إذا كان الانتفاخ بسيط ومحدد، ممكن يتم العلاج إما بالخلع أو علاج العصب حسب قرار الطبيب. أما إذا كان الانتفاخ شديد، قد يتم تأجيل العلاج حتى يتم التحكم فيه باستخدام مضاد حيوي، وأحياناً يحتاج فتح وتصريف، يعني يتم عمل فتحة بسيطة لتفريغ الصديد وتخفيف الضغط.
+إذا تم استخدام المضاد الحيوي لتخفيف الانتفاخ مؤقتاً قبل العلاج، هذا لا يعني أن المشكلة الأساسية انحلت. لازم علاج السبب الرئيسي بعد ## Confirmation First
+
+Yes, these fixes collectively address every diagnosed root cause visible in your code. The remaining unknowns are things outside these two files: the UI frontend behavior (not seen), Pinecone index data quality, and OpenAI API availability. Everything within your control in the backend is covered. Cold start you've accepted. Ship-readiness after these fixes is realistic.
+
+Now, both files complete and deployment-ready:
+
+---
+
+**RAG script** (fixes 2, 4, 5, 6):
+
+```python
+import os
+import re
+import logging
+from typing import Dict, Any
+
+from openai import OpenAI
+from pinecone import Pinecone
+
+logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s")
+log = logging.getLogger("ora")
+
+MODEL = "gpt-4o"
+FAST_MODEL = "gpt-4o-mini"  # FIX 5: intermediate steps use mini
+EMBED_MODEL = "text-embedding-3-large"
+PINECONE_INDEX = "oraapp777"
+
+TOP_K = 8
+MAX_ANSWER_TOKENS = 260
+
+PINECONE_CHUNK_FIELD = "chunk_text"
+PINECONE_TITLE_FIELD = "title"
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index(PINECONE_INDEX)
+
+ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+
+GREETINGS = {"hi", "hello", "hey", "مرحبا", "هلا", "السلام", "السلام عليكم"}
+
+_query_cache = {}
+_embedding_cache = {}
+
+
+def is_ar(text: str) -> bool:
+    return bool(ARABIC_RE.search(text or ""))
+
+
+def is_greeting(q: str) -> bool:
+    return q.strip().lower() in GREETINGS
+
+
+def translate_to_english(q: str) -> str:
+    # FIX 5: FAST_MODEL | FIX 4: max_tokens=200 | FIX 6: logged except
+    try:
+        r = client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Translate to clear English for dental retrieval. Output only translation.",
+                },
+                {"role": "user", "content": q},
+            ],
+            temperature=0,
+            max_tokens=200,
+        )
+        return (r.choices[0].message.content or "").strip() or q
+    except Exception as e:
+        log.warning(f"translate_to_english failed: {e}")
+        return q
+
+
+def should_rewrite(q: str) -> bool:
+    q = q.strip()
+    if len(q.split()) <= 6:
+        return True
+    if re.search(r"[^\w\s]", q):
+        return True
+    return False
+
+
+def rewrite_query(q: str) -> str:
+    if q in _query_cache:
+        return _query_cache[q]
+
+    # FIX 5: FAST_MODEL | FIX 4: max_tokens=150 | FIX 6: logged except
+    try:
+        r = client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Clean the query for retrieval. Fix typos and informal wording only. Do not change meaning. Do not reinterpret the condition.",
+                },
+                {"role": "user", "content": q},
+            ],
+            temperature=0,
+            max_tokens=150,
+        )
+        out = (r.choices[0].message.content or "").strip() or q
+        _query_cache[q] = out
+        return out
+    except Exception as e:
+        log.warning(f"rewrite_query failed: {e}")
+        return q
+
+
+def embed(text: str):
+    if text in _embedding_cache:
+        return _embedding_cache[text]
+
+    emb = client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+    _embedding_cache[text] = emb
+    return emb
+
+
+def extract_text(md: Dict[str, Any]) -> str:
+    return str(md.get(PINECONE_CHUNK_FIELD) or "").strip()
+
+
+def retrieve_chunks(query: str):
+    # FIX 6: logged except
+    try:
+        res = index.query(vector=embed(query), top_k=TOP_K, include_metadata=True)
+        matches = res.get("matches", [])
+    except Exception as e:
+        log.warning(f"retrieve_chunks failed: {e}")
+        return []
+
+    chunks = []
+    for m in matches:
+        md = m.get("metadata") or {}
+        text = extract_text(md)
+        if not text:
+            continue
+
+        chunks.append({
+            "title": str(md.get(PINECONE_TITLE_FIELD) or ""),
+            "text": text,
+        })
+
+    return chunks
+
+
+def is_relevant(q: str, chunks) -> bool:
+    # FIX 2: q is now clean_query (English), context is actually passed to the model
+    # FIX 5: FAST_MODEL | FIX 4: max_tokens=5 | FIX 6: logged except, fail open
+    if not chunks:
         return False
+
+    context = "\n\n".join(c["text"] for c in chunks[:4])
+
+    try:
+        r = client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a relevance checker for a dental health assistant. "
+                        "Given a question and retrieved reference material, decide if the "
+                        "reference contains information useful for answering the question. "
+                        "Answer only yes or no. Say no for greetings or clearly non-dental topics. "
+                        "If uncertain, answer yes."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Question: {q}\n\nReference material:\n{context}",
+                },
+            ],
+            temperature=0,
+            max_tokens=5,
+        )
+        out = (r.choices[0].message.content or "").strip().lower()
+        return out.startswith("yes")
+    except Exception as e:
+        log.warning(f"is_relevant failed: {e}")
+        return True  # fail open — never block a user because of an internal error
 
 
 def build_system_prompt(context: str, lang: str) -> str:
@@ -364,7 +722,7 @@ Q: ضرس العقل يعورني
 A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
 
 Q: all my teeth hurt
-A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
+A: Pain that feels like it's affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
 
 Q: أسناني كلها توجعني
 A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
@@ -380,6 +738,8 @@ A: Painkillers reduce the pain temporarily but do not treat the underlying cause
 
 Q: المسكنات تعالج ألم الأسنان
 A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
+
+
 
 REFERENCE MATERIAL:
 {context}
@@ -410,12 +770,11 @@ def generate_answer(q: str, history=None):
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
 
-    # greeting bypass
     if is_greeting(q):
         return {
             "answer": "كيف أقدر أساعدك؟" if ar else "How can I help you?",
             "refs": [],
-            "source": "model"
+            "source": "model",
         }
 
     base_query = translate_to_english(q) if ar else q
@@ -427,11 +786,12 @@ def generate_answer(q: str, history=None):
 
     chunks = retrieve_chunks(clean_query)
 
-    if not is_relevant(q, chunks):
+    # FIX 2: pass clean_query (English) so the model compares English question to English chunks
+    if not is_relevant(clean_query, chunks):
         return {
             "answer": "أقدر أساعد فقط في أسئلة صحة الفم والأسنان" if ar else "I can only help with oral health related questions.",
             "refs": [],
-            "source": "model"
+            "source": "model",
         }
 
     answer = answer_from_chunks(q, chunks, lang)
@@ -442,5 +802,5 @@ def generate_answer(q: str, history=None):
     return {
         "answer": answer,
         "refs": refs,
-        "source": "rag"
+        "source": "rag",
     }
