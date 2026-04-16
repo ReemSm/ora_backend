@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import time
@@ -16,7 +15,7 @@ import step3_dataset_gpt_with_contract_and_strict_rag as rag
 MAX_QUERY_LENGTH = 500
 MAX_HISTORY_TURNS = 6
 MAX_HISTORY_CONTENT_LENGTH = 500
-REQUEST_TIMEOUT_SECONDS = 15
+REQUEST_TIMEOUT_SECONDS = 90  # FIX 3: raised from 15 to give full pipeline time to complete
 
 ALLOWED_ORIGINS = ["*"]
 
