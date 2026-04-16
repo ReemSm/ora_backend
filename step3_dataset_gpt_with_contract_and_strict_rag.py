@@ -10,7 +10,6 @@ logging.basicConfig(level=logging.INFO, format="[ORA %(levelname)s] %(message)s"
 log = logging.getLogger("ora")
 
 MODEL = "gpt-4o"
-FAST_MODEL = "gpt-4o-mini"
 EMBED_MODEL = "text-embedding-3-large"
 PINECONE_INDEX = "oraapp777"
 
@@ -43,17 +42,15 @@ def is_greeting(q: str) -> bool:
 def translate_to_english(q: str) -> str:
     try:
         r = client.chat.completions.create(
-            model=FAST_MODEL,
+            model=MODEL,
             messages=[
                 {"role": "system", "content": "Translate to clear English for dental retrieval. Output only translation."},
                 {"role": "user", "content": q},
             ],
             temperature=0,
-            max_tokens=200,
         )
         return (r.choices[0].message.content or "").strip() or q
-    except Exception as e:
-        log.warning(f"translate_to_english failed: {e}")
+    except:
         return q
 
 
@@ -72,7 +69,7 @@ def rewrite_query(q: str) -> str:
 
     try:
         r = client.chat.completions.create(
-            model=FAST_MODEL,
+            model=MODEL,
             messages=[
                 {
                     "role": "system",
@@ -81,13 +78,11 @@ def rewrite_query(q: str) -> str:
                 {"role": "user", "content": q},
             ],
             temperature=0,
-            max_tokens=150,
         )
         out = (r.choices[0].message.content or "").strip() or q
         _query_cache[q] = out
         return out
-    except Exception as e:
-        log.warning(f"rewrite_query failed: {e}")
+    except:
         return q
 
 
@@ -108,8 +103,7 @@ def retrieve_chunks(query: str):
     try:
         res = index.query(vector=embed(query), top_k=TOP_K, include_metadata=True)
         matches = res.get("matches", [])
-    except Exception as e:
-        log.warning(f"retrieve_chunks failed: {e}")
+    except:
         return []
 
     chunks = []
@@ -128,43 +122,30 @@ def retrieve_chunks(query: str):
 
 
 def is_relevant(q: str, chunks) -> bool:
-    """
-    Topic classifier only. Decides whether the question is about oral health.
-    Does NOT evaluate chunk quality — the final answer prompt handles that
-    via: "If the reference material does not contain the answer, do NOT answer."
-    q should always be the English form of the query.
-    """
     if not chunks:
         return False
 
+    context = " ".join(c["text"] for c in chunks)
+
     try:
         r = client.chat.completions.create(
-            model=FAST_MODEL,
+            model=MODEL,
             messages=[
                 {
-                    "role": "system",
-                    "content": (
-                        "You are a topic classifier for a dental health assistant. "
-                        "Decide whether the question is about oral health, teeth, gums, "
-                        "dental procedures, or anything mouth-related. "
-                        "Answer only yes or no. "
-                        "Say no only for greetings or clearly non-dental topics. "
-                        "If uncertain, answer yes."
-                    ),
+                    "role": "system", "content": "Is this question about oral or dental health? If clearly yes, answer yes. If clearly unrelated, answer no. If uncertain, answer yes."
                 },
                 {
+    
                     "role": "user",
                     "content": f"Question: {q}",
                 },
             ],
             temperature=0,
-            max_tokens=5,
         )
         out = (r.choices[0].message.content or "").strip().lower()
         return out.startswith("yes")
-    except Exception as e:
-        log.warning(f"is_relevant failed: {e}")
-        return True  # fail open — never block a user because of an internal error
+    except:
+        return False
 
 
 def build_system_prompt(context: str, lang: str) -> str:
@@ -383,7 +364,7 @@ Q: ضرس العقل يعورني
 A: ألم ضرس العقل غالباً يكون بسبب التهاب في اللثة حوله، أو ضغط بسبب عدم وجود مساحة كافية، أو تسوس إذا كان جزء منه مكشوف.
 
 Q: all my teeth hurt
-A: Pain that feels like it's affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
+A: Pain that feels like it’s affecting all teeth can happen with generalized gum inflammation or when one irritated tooth causes pain that spreads.
 
 Q: أسناني كلها توجعني
 A: الإحساس بأن كل الأسنان تؤلم ممكن يكون بسبب التهاب عام في اللثة أو بسبب سن واحد وينتشر الألم لباقي الأسنان.
@@ -399,8 +380,6 @@ A: Painkillers reduce the pain temporarily but do not treat the underlying cause
 
 Q: المسكنات تعالج ألم الأسنان
 A: المسكنات تخفف الألم مؤقتاً لكنها لا تعالج السبب مثل التسوس أو الالتهاب.
-
-
 
 REFERENCE MATERIAL:
 {context}
@@ -431,11 +410,12 @@ def generate_answer(q: str, history=None):
     ar = is_ar(q)
     lang = "arabic" if ar else "english"
 
+    # greeting bypass
     if is_greeting(q):
         return {
             "answer": "كيف أقدر أساعدك؟" if ar else "How can I help you?",
             "refs": [],
-            "source": "model",
+            "source": "model"
         }
 
     base_query = translate_to_english(q) if ar else q
@@ -447,12 +427,11 @@ def generate_answer(q: str, history=None):
 
     chunks = retrieve_chunks(clean_query)
 
-    # clean_query is always English here, which is what the topic classifier works best with
-    if not is_relevant(clean_query, chunks):
+    if not is_relevant(q, chunks):
         return {
             "answer": "أقدر أساعد فقط في أسئلة صحة الفم والأسنان" if ar else "I can only help with oral health related questions.",
             "refs": [],
-            "source": "model",
+            "source": "model"
         }
 
     answer = answer_from_chunks(q, chunks, lang)
@@ -463,5 +442,5 @@ def generate_answer(q: str, history=None):
     return {
         "answer": answer,
         "refs": refs,
-        "source": "rag",
+        "source": "rag"
     }
