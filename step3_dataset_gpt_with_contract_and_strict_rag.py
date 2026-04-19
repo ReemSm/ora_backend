@@ -195,6 +195,7 @@ You MUST follow them. Do not default to textbook or formal language.
 7. If the reference material does not contain the answer, do NOT answer.
 
 8. Consistency is required. The same question must always produce the same style and level of detail as the examples.
+response_text = re.sub(r'^\s*A:\s*', '', response_text)
 
 Q: my tooth hurts
 A: Tooth pain is usually caused by decay, nerve inflammation, or gum inflammation. Sometimes it comes from another tooth or the sinuses. The exact cause depends on the specific characteristics of the pain you are experiencing and when it happens. If it continues or gets worse, a dental checkup is recommended.
