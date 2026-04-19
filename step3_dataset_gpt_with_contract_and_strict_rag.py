@@ -370,16 +370,20 @@ REFERENCE MATERIAL:
 """
 
 
-def answer_from_chunks(q: str, chunks, lang: str):
+def answer_from_chunks(q: str, chunks, lang: str, history=None):
     context = "\n\n".join(c["text"] for c in chunks)
     system = build_system_prompt(context, lang)
 
+    messages = [{"role": "system", "content": system}]
+
+    if history:
+        messages.extend(history)
+
+    messages.append({"role": "user", "content": q})
+
     r = client.chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": q},
-        ],
+        messages=messages,
         temperature=0,
         max_tokens=MAX_ANSWER_TOKENS,
     )
@@ -417,7 +421,7 @@ def generate_answer(q: str, history=None):
             "source": "model",
         }
 
-    answer = answer_from_chunks(q, chunks, lang)
+    answer = answer_from_chunks(q, chunks, lang, history)
     log.info(f"ANSWER: {answer}")
 
     refs = list({c["title"] for c in chunks if c["title"]})[:3]
